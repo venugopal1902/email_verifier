@@ -16,8 +16,11 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from files.views import FileUploadView, FileStatusView
-from accounts.views import LoginView, RegisterView # Ensure views are imported from the correct app
+from files.views import (
+    FileUploadView, FileStatusView, FileListView,
+    ListUploadView, ListDeleteView 
+)
+from accounts.views import LoginView, RegisterView 
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -27,8 +30,13 @@ urlpatterns = [
     path('v1/auth/register', RegisterView.as_view(), name='auth-register'),
     
     # --- File/Data Endpoints (PRD Section 4.6) ---
+    path('v1/files', FileListView.as_view(), name='file-list'), 
     path('v1/files/upload', FileUploadView.as_view(), name='file-upload'),
     path('v1/files/<str:file_id>', FileStatusView.as_view(), name='file-status'),
+    
+    # --- Bounce/Unsubscribe Endpoints (PRD Section 4.7) ---
+    path('v1/lists/upload/<str:list_type>', ListUploadView.as_view(), name='list-upload'), 
+    path('v1/lists/<str:list_type>/<str:email>', ListDeleteView.as_view(), name='list-delete'), 
     
     # Simple root for UI demonstration
     path('', include('files.urls')), 

@@ -32,7 +32,8 @@ class LoginView(views.APIView):
     Handles POST /v1/auth/login
     Authenticates user and returns JWT tokens (FR39, FR40).
     """
-    # Note: We must ensure a separate session is established if using DRF without full JWT library
+    # Disable session-based authentication for this endpoint so CSRF is not required
+    authentication_classes = []
     permission_classes = [] 
 
     def post(self, request):
@@ -85,6 +86,8 @@ class RegisterView(views.APIView):
     """
     Endpoint for user creation (FR01, FR04). Used by Admin to provision users/owners.
     """
+    # Disable session-based authentication for registration endpoint as well
+    authentication_classes = []
     permission_classes = []
 
     def post(self, request):

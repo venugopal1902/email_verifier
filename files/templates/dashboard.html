@@ -10,7 +10,7 @@
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
         body { font-family: 'Inter', sans-serif; background-color: #f4f6f8; }
         /* Simple styling to ensure the modal content is readable */
-        #login-modal input { background-color: #ffffff; }
+        #auth-modal input { background-color: #ffffff; }
     </style>
 </head>
 <body class="p-4 sm:p-8">
@@ -90,6 +90,7 @@
                             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                         </svg>
                     </button>
+                    <div id="upload-debug" class="text-sm text-gray-500 mt-2">Auth: unknown</div>
                 </form>
             </div>
 
@@ -122,6 +123,7 @@
         const LOGIN_URL = '/v1/auth/login';
         const REGISTER_URL = '/v1/auth/register';
         const STATUS_URL = '/v1/files/';
+        const FILE_LIST_URL = '/v1/files'; // URL for listing files
         
         const AUTH_MODAL = document.getElementById('auth-modal');
         const AUTH_FORM = document.getElementById('auth-form');
@@ -143,10 +145,14 @@
         const STATUS_AREA = document.getElementById('status-area');
         const CREDIT_BALANCE = document.getElementById('credit-balance');
         
-        // --- AUTH STATE ---
         let ACCESS_TOKEN = localStorage.getItem('access_token');
         let USER_DATA = JSON.parse(localStorage.getItem('user_data') || '{}');
-        let authMode = 'login'; // 'login' or 'register'
+        let authMode = 'login'; 
+
+        // Always read the freshest token (falls back to in-memory ACCESS_TOKEN)
+        function getAccessToken() {
+            return ACCESS_TOKEN || localStorage.getItem('access_token');
+        }
 
 
         // --- UI VISIBILITY ---
@@ -185,31 +191,33 @@
 
         function updateUI(isAuthenticated) {
             if (isAuthenticated) {
-                // Show authenticated content
                 AUTHENTICATED_CONTENT.classList.remove('hidden');
                 UNAUTHENTICATED_MESSAGE.classList.add('hidden');
                 
-                // Update header
                 USER_EMAIL_SPAN.textContent = USER_DATA.email;
                 AUTH_BUTTON.textContent = 'Logout';
                 AUTH_BUTTON.onclick = logout;
                 
-                // Fetch dynamic data
                 fetchCredits();
+                fetchUploadHistory(); 
+                // Update upload debug element
+                const dbg = document.getElementById('upload-debug');
+                if (dbg) dbg.textContent = `Auth: token present, user=${USER_DATA.email || 'unknown'}`;
             } else {
-                // Show unauthenticated message
-                AUTHENTICATED_CONTENT.classList.add('hidden');
                 UNAUTHENTICATED_MESSAGE.classList.remove('hidden');
+                AUTHENTICATED_CONTENT.classList.add('hidden');
                 
-                // Update header
                 USER_EMAIL_SPAN.textContent = 'Guest';
                 AUTH_BUTTON.textContent = 'Login';
                 AUTH_BUTTON.onclick = () => showLoginModal('login');
+                const dbg = document.getElementById('upload-debug');
+                if (dbg) dbg.textContent = 'Auth: no token';
             }
         }
 
-        // --- AUTH LOGIC ---
 
+        // --- AUTH LOGIC ---
+        
         AUTH_FORM.addEventListener('submit', async function(e) {
             e.preventDefault();
             const email = document.getElementById('auth-email').value;
@@ -231,13 +239,33 @@
                     body: JSON.stringify(bodyData)
                 });
 
-                const data = await response.json();
+                // Try to parse JSON safely. Some server errors (500/HTML) may return non-JSON
+                // which would cause response.json() to throw and end up in the catch block.
+                let data = null;
+                const contentType = response.headers.get('content-type') || '';
+                if (contentType.includes('application/json')) {
+                    try {
+                        data = await response.json();
+                    } catch (parseErr) {
+                        console.error('Failed to parse JSON response:', parseErr);
+                        const txt = await response.text();
+                        console.error('Response text:', txt);
+                        AUTH_MESSAGE.textContent = txt || 'Server returned invalid JSON.';
+                        return;
+                    }
+                } else {
+                    // Non-JSON response (likely an error page). Read as text and show it.
+                    const txt = await response.text();
+                    console.error('Non-JSON response from auth endpoint:', txt);
+                    AUTH_MESSAGE.textContent = txt || 'Server returned an unexpected response.';
+                    return;
+                }
 
                 if (response.ok) {
                     if (authMode === 'register') {
                         AUTH_MESSAGE.textContent = `User ${email} created! Please log in.`;
                         showLoginModal('login');
-                    } else { // Login success
+                    } else { 
                         ACCESS_TOKEN = data.access_token;
                         USER_DATA = data.user;
                         localStorage.setItem('access_token', ACCESS_TOKEN);
@@ -247,22 +275,21 @@
                         updateUI(true);
                     }
                 } else {
-                    AUTH_MESSAGE.textContent = data.error || 'Operation failed.';
+                    AUTH_MESSAGE.textContent = (data && (data.error || data.detail)) || 'Operation failed.';
                 }
             } catch (error) {
                 console.error('Auth request failed:', error);
-                AUTH_MESSAGE.textContent = 'Network or server error.';
+                // Provide the underlying error message if available to aid debugging
+                AUTH_MESSAGE.textContent = error && error.message ? error.message : 'Network or server error.';
             }
         });
 
         function logout() {
-            // Note: In a production app, POST /v1/auth/logout would be called here.
             ACCESS_TOKEN = null;
             USER_DATA = {};
             localStorage.removeItem('access_token');
             localStorage.removeItem('user_data');
             updateUI(false);
-            // Clear status area
             STATUS_AREA.innerHTML = '<div class="p-4 bg-yellow-50 text-yellow-700 rounded-lg shadow-sm"><p>No uploads yet. Upload your first file above!</p></div>';
         }
 
@@ -270,7 +297,6 @@
         // --- API & UTILITIES ---
 
         function fetchCredits() {
-            // Simulated credit balance fetch (FR34)
             if (USER_DATA.account_id) {
                 CREDIT_BALANCE.textContent = '50,000 (Simulated)';
             } else {
@@ -288,13 +314,74 @@
             }
         }
 
-        // --- STATUS POLLING (omitted for brevity, assume previous correct logic) ---
+        // --- FETCH HISTORY AND RENDER ---
+        function renderFileStatus(file) {
+             const started = file.started_at ? file.started_at.split(' ')[1] : 'N/A';
+             const completed = file.completed_at ? file.completed_at.split(' ')[1] : 'N/A';
+             const statusClass = file.status === 'COMPLETED' ? 'text-green-600 border-green-400' : 
+                                file.status === 'PROCESSING' ? 'text-yellow-600 border-yellow-400' : 
+                                'text-blue-600 border-blue-200';
+             
+             return `
+                <div id="status-${file.file_id}" class="p-4 bg-gray-50 border rounded-lg shadow-sm transition duration-300 ease-in-out ${statusClass}">
+                    <p class="text-lg font-bold">${file.file_name} (${file.file_id.substring(0, 8)}...)</p>
+                    <p class="text-sm">Status: 
+                        <span class="font-semibold ${statusClass}">${file.status}</span>
+                    </p>
+                    <div class="text-xs text-gray-500 mt-1 space-y-0.5">
+                        <p>Emails: ${file.unique_record_count} (Original: ${file.original_record_count})</p>
+                        <p>Filtered: ${file.filtered_bounce_count + file.filtered_unsub_count}</p>
+                        <p>Timing: Start ${started} / End ${completed}</p>
+                    </div>
+                </div>`;
+        }
+        
+           async function fetchUploadHistory() {
+               const token = getAccessToken();
+               if (!token) return;
+
+               STATUS_AREA.innerHTML = '<p class="text-center text-gray-500">Loading history...</p>';
+
+             try {
+                 const response = await fetch(FILE_LIST_URL, {
+                     headers: { 'Authorization': `Bearer ${token}` }
+                 });
+
+                 if (response.status === 401 || response.status === 403) {
+                     logout();
+                     return;
+                 }
+                 
+                 const data = await response.json();
+                 
+                 let html = '';
+                 if (data.files && data.files.length > 0) {
+                     data.files.forEach(file => {
+                         html += renderFileStatus(file);
+                         if (file.status !== 'COMPLETED') {
+                             pollStatus(file.file_id);
+                         }
+                     });
+                 } else {
+                     html = '<div class="p-4 bg-yellow-50 text-yellow-700 rounded-lg shadow-sm"><p>No uploads yet. Upload your first file above!</p></div>';
+                 }
+                 STATUS_AREA.innerHTML = html;
+
+             } catch (error) {
+                 console.error('Error fetching file history:', error);
+                 STATUS_AREA.innerHTML = '<p class="text-red-500">Failed to load history. Check console for details.</p>';
+             }
+        }
+
+
+        // --- STATUS POLLING ---
         function pollStatus(fileId) {
-            if (!ACCESS_TOKEN) return;
+            const token = getAccessToken();
+            if (!token) return;
 
             fetch(STATUS_URL + fileId, {
                 headers: {
-                    'Authorization': `Bearer ${ACCESS_TOKEN}`,
+                    'Authorization': `Bearer ${token}`,
                 }
             })
             .then(res => {
@@ -309,26 +396,14 @@
 
                 const statusDiv = document.getElementById(`status-${fileId}`);
                 if (statusDiv) {
-                    statusDiv.innerHTML = `
-                        <p class="text-lg font-bold">${data.file_name} (${data.file_id.substring(0, 8)}...)</p>
-                        <p class="text-sm">Status: 
-                            <span class="font-semibold ${data.status === 'COMPLETED' ? 'text-green-600' : data.status === 'PROCESSING' ? 'text-yellow-600' : 'text-blue-600'}">
-                                ${data.status}
-                            </span>
-                        </p>
-                        <p class="text-xs text-gray-500">Unique Records: ${data.unique_record_count}</p>
-                        <p class="text-xs text-gray-500">Filtered Bounces/Unsubs: ${data.filtered_bounces + data.filtered_unsubs}</p>
-                    `;
-                }
+                    const newHtml = renderFileStatus(data);
+                    statusDiv.outerHTML = newHtml; 
 
-                if (data.status !== 'COMPLETED') {
-                    setTimeout(() => pollStatus(fileId), 3000); 
-                } else {
-                    if (statusDiv) {
-                        statusDiv.classList.add('border-green-400');
-                        statusDiv.classList.remove('border-blue-200');
+                    if (data.status !== 'COMPLETED') {
+                        setTimeout(() => pollStatus(fileId), 3000); 
+                    } else {
+                        console.log(`Verification COMPLETED for file: ${data.file_name}`);
                     }
-                    console.log(`Verification COMPLETED for file: ${data.file_name}`);
                 }
             })
             .catch(error => {
@@ -337,11 +412,19 @@
         }
 
 
-        // --- MAIN UPLOAD LOGIC (omitted for brevity, assume previous correct logic) ---
+        // --- MAIN UPLOAD LOGIC ---
         UPLOAD_FORM.addEventListener('submit', function(e) {
             e.preventDefault();
             
-            if (!ACCESS_TOKEN) {
+            const token = getAccessToken();
+            console.log('Upload submit - token:', token, 'USER_DATA:', USER_DATA);
+            try {
+                const dbg = document.getElementById('upload-debug');
+                if (dbg) dbg.textContent = `Auth debug - token: ${token ? 'present' : 'missing'}; user: ${USER_DATA.email || 'none'}`;
+            } catch (err) {
+                console.error('Failed to update upload debug element', err);
+            }
+            if (!token) {
                 showLoginModal('login');
                 return;
             }
@@ -358,19 +441,17 @@
             fetch(API_BASE, {
                 method: 'POST',
                 headers: {
-                    'Authorization': `Bearer ${ACCESS_TOKEN}`,
+                    'Authorization': `Bearer ${token}`,
                 },
                 body: formData
             })
             .then(res => {
-                if (!res.status === 403 || res.status === 401) {
-                    logout();
-                    // Log the upload failure due to auth
-                    throw new Error("Session expired. Please log in."); 
-                }
-                
                 if (!res.ok) {
                     return res.json().then(err => { 
+                         if (res.status === 403 || res.status === 401) {
+                            logout();
+                            throw new Error("Session expired. Please log in.");
+                        }
                         throw new Error(err.detail || 'Upload failed.'); 
                     });
                 }
@@ -379,33 +460,28 @@
             .then(data => {
                 setUploading(false);
                 
-                // Add new status widget to the top
-                const statusDiv = document.createElement('div');
-                statusDiv.id = `status-${data.file_id}`;
-                statusDiv.className = 'p-4 bg-blue-50 border border-blue-200 rounded-lg shadow-sm transition duration-300 ease-in-out';
-                statusDiv.innerHTML = `
-                    <p class="text-lg font-bold">${file.name} (${data.file_id.substring(0, 8)}...)</p>
-                    <p class="text-sm">Status: <span class="font-semibold text-blue-600">${data.status}</span></p>
-                    <p class="text-xs text-gray-500">Message: ${data.message}</p>
-                `;
-                STATUS_AREA.prepend(statusDiv);
+                const statusHtml = renderFileStatus(data);
+                
+                if (STATUS_AREA.innerHTML.includes('No uploads yet')) {
+                    STATUS_AREA.innerHTML = '';
+                }
+
+                // Insert the new file status at the beginning of the list
+                STATUS_AREA.insertAdjacentHTML('afterbegin', statusHtml);
                 
                 // Start polling for status updates
                 pollStatus(data.file_id);
             })
             .catch(error => {
                 setUploading(false);
-                // In production, use a custom error modal/toast, not alert
                 console.error(error);
-                AUTH_MESSAGE.textContent = error.message; 
             });
         });
 
-        // Initialize on load
-        window.onload = () => {
-             // Check if user is logged in via localStorage on page load
-             updateUI(!!ACCESS_TOKEN && !!USER_DATA.email);
-        };
+           // Initialize on load
+           window.onload = () => {
+               updateUI(!!getAccessToken() && !!USER_DATA.email);
+           };
 
     </script>
 </body>
