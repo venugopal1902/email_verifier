@@ -1,0 +1,63 @@
+This is a fantastic and challenging project! I will set up a robust, scalable architecture using Python (Django) and Docker, integrating PostgreSQL (for core SQL data) and Redis (for caching and the Celery task queue, as recommended).
+
+Due to the complexity and the "database isolation per account" requirement, I'm providing a complete, multi-file structure focusing on the architectural backbone, including **database routing** (the critical part for multi-tenancy) and **asynchronous processing** for the verification pipeline.
+
+Here are the files for the starter project:
+
+### 1. Project Infrastructure (Docker)
+
+These files define the environment, making it runnable and isolated.
+
+
+f
+
+http://googleusercontent.com/immersive_entry_chip/1
+
+http://googleusercontent.com/immersive_entry_chip/2
+
+http://googleusercontent.com/immersive_entry_chip/3
+
+### 2. Django Core Configuration and Models
+
+These files set up the Django project, multi-tenant routing, and core data models.
+
+
+http://googleusercontent.com/immersive_entry_chip/4
+
+http://googleusercontent.com/immersive_entry_chip/5
+
+http://googleusercontent.com/immersive_entry_chip/6
+
+http://googleusercontent.com/immersive_entry_chip/7
+
+### 3. Asynchronous Tasks (Celery)
+
+This is where the heavy-lifting verification pipeline runs asynchronously (NFR05).
+
+
+http://googleusercontent.com/immersive_entry_chip/8
+
+### 4. Django Views and URLs
+
+This provides the basic API endpoints for file handling and task submission.
+
+
+http://googleusercontent.com/immersive_entry_chip/9
+
+http://googleusercontent.com/immersive_entry_chip/10
+
+http://googleusercontent.com/immersive_entry_chip/11
+
+### 5. Frontend UI (HTML/JS)
+
+A minimal, single-file HTML frontend using Tailwind CSS classes for aesthetics and JavaScript to interact with the Django API.
+
+
+http://googleusercontent.com/immersive_entry_chip/12
+
+This structure provides the necessary components:
+
+1.  **Isolation (SQL):** The `core/db_routers.py` handles the logic to direct Main DB models (`accounts` app) to the `default` (PostgreSQL) database and Account DB models (`files` app) to a dynamic, per-account database (required for FR07).
+2.  **Concurrency (Redis/Celery):** `docker-compose.yml` sets up Redis as the broker and backend, and a dedicated `celery` worker service to process the heavy `process_verification_pipeline` task asynchronously (NFR05).
+3.  **Core Logic (Python/Django):** `accounts/models.py` and `files/models.py` implement the PRD's schema, and `files/tasks.py` simulates the multi-stage verification and credit deduction (FR31, FR32).
+4.  **UI (HTML/JS/CSS):** `dashboard.html` provides a basic, responsive interface to test the file upload API flow.
