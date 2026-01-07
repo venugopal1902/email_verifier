@@ -1,72 +1,97 @@
 import redis
 import os
 import time
-from .consistent_hash import ConsistentHash  # Use local implementation instead of PyPI package
+from .consistent_hash import ConsistentHash 
 
 # Initialize Redis connection parameters from .env
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
 
-# --- Consistent Hashing Setup ---
-# Shards represent logical nodes where the lists are stored.
-# For simplicity, we use one node here, but the structure allows easy scaling.
-REDIS_SHARDS = ['redis_node_1'] 
+# --- Consistent Hashing Configuration ---
+# Simulating sharding using different Redis logical Databases on the same host.
+REDIS_NODES_CONFIG = {
+    'shard_01': {'host': REDIS_HOST, 'port': REDIS_PORT, 'db': 2},
+    'shard_02': {'host': REDIS_HOST, 'port': REDIS_PORT, 'db': 3},
+    'shard_03': {'host': REDIS_HOST, 'port': REDIS_PORT, 'db': 4},
+}
+
+# Create the Ring
+REDIS_SHARDS = list(REDIS_NODES_CONFIG.keys())
 SHARD_RING = ConsistentHash(REDIS_SHARDS)
 
 # --- Connection Pools ---
-# Use DB 2 for Bounce/Unsubscribe list storage (dedicated memory space)
-try:
-    REDIS_POOL = redis.ConnectionPool(host=REDIS_HOST, port=REDIS_PORT, db=2, decode_responses=True)
+_CONNECTION_POOLS = {}
+
+def get_redis_connection(node_name=None):
+    """Returns a Redis connection for the specific node."""
+    if not node_name:
+        pool_key = 'default'
+        config = {'host': REDIS_HOST, 'port': REDIS_PORT, 'db': 0}
+    else:
+        pool_key = node_name
+        config = REDIS_NODES_CONFIG.get(node_name)
+        if not config: return None
+
+    if pool_key not in _CONNECTION_POOLS:
+        try:
+            _CONNECTION_POOLS[pool_key] = redis.ConnectionPool(
+                host=config['host'],
+                port=config['port'],
+                db=config['db'],
+                decode_responses=True
+            )
+        except Exception as e:
+            print(f"ERROR: Failed to create pool for {pool_key}: {e}")
+            return None
+
+    return redis.Redis(connection_pool=_CONNECTION_POOLS[pool_key])
+
+# --- Global Key Management ---
+
+def add_to_list(email, list_type='BOUNCE', user_id='system'):
+    """
+    Adds an email to the GLOBAL distributed list.
+    Shards by EMAIL to ensure even distribution across nodes.
+    """
+    email = email.lower().strip()
     
-    def get_redis_connection():
-        """Returns a Redis connection from the pool."""
-        return redis.Redis(connection_pool=REDIS_POOL)
-
-except Exception as e:
-    # Print error but allow app to start for other functions
-    print(f"ERROR: Failed to initialize Redis connection pool for lists: {e}")
-    get_redis_connection = lambda: None 
-
-# --- Key Management ---
-# The Hash function in the ConsistentHash package determines the physical node.
-# The logical key is always the same for a given account/list type.
-
-def get_hash_node(key):
-    """Returns the logical node (shard) responsible for the given key."""
-    return SHARD_RING.get_node(key)
-
-def get_bounce_key(account_id):
-    """Generates the main Redis Hash key for the account's bounce list."""
-    return f"A{account_id}:BOUNCE"
-
-def get_unsub_key(account_id):
-    """Generates the main Redis Hash key for the account's unsubscribe list."""
-    return f"A{account_id}:UNSUB"
-
-def add_to_list(account_id, email, list_type='BOUNCE', reason="Manual"):
-    """Adds an email to the specified list in Redis using HSET (O(1))."""
-    r = get_redis_connection()
+    # 1. Determine Global Key Name (Same key name exists on all shards)
+    key = "GLOBAL:BOUNCE" if list_type == 'BOUNCE' else "GLOBAL:UNSUB"
+    
+    # 2. Determine Shard based on EMAIL (Content-based sharding)
+    target_node = SHARD_RING.get_node(email)
+    
+    # 3. Connect to that specific shard
+    r = get_redis_connection(target_node)
     if not r: return 0
 
-    key = get_bounce_key(account_id) if list_type == 'BOUNCE' else get_unsub_key(account_id)
-        
-    # HSET returns 1 if added, 0 if updated (unique check)
-    return r.hset(key, email.lower(), f"{reason}|{time.time()}")
+    # 4. Store Email -> UserID map.
+    # This deduplicates automatically (Hash structure) while tracking the source.
+    return r.hset(key, email, str(user_id))
 
-def check_list(account_id, email, list_type='BOUNCE'):
-    """Checks if an email exists in the specified list (O(1))."""
-    r = get_redis_connection()
+def check_list(email, list_type='BOUNCE'):
+    """
+    Checks if an email exists in the global list.
+    """
+    email = email.lower().strip()
+    key = "GLOBAL:BOUNCE" if list_type == 'BOUNCE' else "GLOBAL:UNSUB"
+    
+    # Find the shard where this email WOULD live
+    target_node = SHARD_RING.get_node(email)
+    
+    r = get_redis_connection(target_node)
     if not r: return False
-    
-    key = get_bounce_key(account_id) if list_type == 'BOUNCE' else get_unsub_key(account_id)
         
-    return r.hexists(key, email.lower())
+    return r.hexists(key, email)
 
-def delete_from_list(account_id, email, list_type='UNSUB'):
-    """Deletes an email from the specified list. Returns 1 if deleted, 0 otherwise."""
-    r = get_redis_connection()
+def delete_from_list(email, list_type='UNSUB'):
+    """Deletes an email from the global list."""
+    email = email.lower().strip()
+    key = "GLOBAL:BOUNCE" if list_type == 'BOUNCE' else "GLOBAL:UNSUB"
+    
+    target_node = SHARD_RING.get_node(email)
+    
+    r = get_redis_connection(target_node)
     if not r: return 0
 
-    key = get_bounce_key(account_id) if list_type == 'BOUNCE' else get_unsub_key(account_id)
-        
-    return r.hdel(key, email.lower())
+    return r.hdel(key, email)

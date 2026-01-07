@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #f4f6f8; }
+        .container-center { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    </style>
+</head>
+<body class="p-4 sm:p-8 container-center">
+    <div class="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md">
+        <h2 class="text-2xl font-bold mb-6 text-gray-800">Create Account</h2>
+        <form id="register-form">
+            <div class="mb-4">
+                <label for="reg-email" class="block text-sm font-medium text-gray-700">Email</label>
+                <input type="email" id="reg-email" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+            </div>
+            <div class="mb-4">
+                <label for="reg-password" class="block text-sm font-medium text-gray-700">Password</label>
+                <input type="password" id="reg-password" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+            </div>
+            <div class="mb-6">
+                <label for="reg-account-id" class="block text-sm font-medium text-gray-700">Account ID (Optional)</label>
+                <input type="text" id="reg-account-id" placeholder="Enter if joining existing account" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+            </div>
+
+            <div id="reg-message" class="text-sm text-red-500 mb-4"></div>
+            <div class="flex justify-between items-center mt-6">
+                <a href="/login/" class="text-sm text-indigo-600 hover:text-indigo-800">Back to Login</a>
+                <button type="submit" class="px-4 py-2 bg-green-600 text-white font-medium rounded-lg hover:bg-green-700 shadow-md">Sign Up</button>
+            </div>
+        </form>
+    </div>
+
+    <script>
+        // FIXED: Added trailing slash
+        const REGISTER_URL = '/api/v2/auth/register/';
+
+        document.getElementById('register-form').addEventListener('submit', async function(e) {
+            // ... existing logic ...
+            e.preventDefault();
+            const email = document.getElementById('reg-email').value;
+            const password = document.getElementById('reg-password').value;
+            const accountId = document.getElementById('reg-account-id').value;
+
+            const msg = document.getElementById('reg-message');
+            msg.textContent = 'Registering...';
+            msg.className = 'text-sm text-gray-500 mb-4';
+
+            try {
+                const response = await fetch(REGISTER_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        email, 
+                        password,
+                        account_id: accountId || null
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    msg.textContent = 'Registration successful! Redirecting to login...';
+                    msg.className = 'text-sm text-green-600 mb-4';
+                    setTimeout(() => { window.location.href = '/login/'; }, 1500);
+                } else {
+                    msg.textContent = data.error || data.detail || 'Registration failed.';
+                    msg.className = 'text-sm text-red-500 mb-4';
+                }
+            } catch (error) {
+                console.error(error);
+                msg.textContent = 'Server error.';
+                msg.className = 'text-sm text-red-500 mb-4';
+            }
+        });
+    </script>
+</body>
+</html

@@ -1,14 +1,14 @@
 from django.db import models
 from django.utils import timezone
 
-# --- Per-Account Database Models (Conceptual, as per PRD Section 2.2 B) ---
-# NOTE: These models are intended to reside in the dynamically provisioned
-# per-account databases, as enforced by the database router.
+# --- Global Shared Models ---
 
-class BounceEmail(models.Model):
-    """BOUNCE_EMAILS - Stores emails identified as hard bounces (FR14, FR15)"""
+class BouncedEmail(models.Model):
+    """
+    Global table for all bounced emails from all users.
+    """
     email = models.EmailField(unique=True, db_index=True)
-    uploaded_by_user_id = models.CharField(max_length=50) # FK to AccountUser.user_id on MAIN DB (stored as ID)
+    uploaded_by_user_id = models.CharField(max_length=50, null=True, blank=True) 
     uploaded_at = models.DateTimeField(default=timezone.now)
 
     def __str__(self):
@@ -18,18 +18,34 @@ class BounceEmail(models.Model):
         db_table = 'bounce_emails'
 
 
+class UnsubscribedEmail(models.Model):
+    """
+    Global table for all unsubscribed emails from all users.
+    """
+    email = models.EmailField(unique=True, db_index=True)
+    uploaded_by_user_id = models.CharField(max_length=50, null=True, blank=True)
+    uploaded_at = models.DateTimeField(default=timezone.now)
+
+    def __str__(self):
+        return self.email
+
+    class Meta:
+        db_table = 'unsubscribed_emails'        
+
+
 class FileUpload(models.Model):
-    """FILE_UPLOADS - Metadata for uploaded files (FR10)"""
+    """FILE_UPLOADS - Metadata for uploaded files"""
     STATUS_CHOICES = [
         ('UPLOADED', 'Uploaded'), 
         ('PROCESSING', 'Processing'), 
-        ('COMPLETED', 'Completed')
+        ('COMPLETED', 'Completed'),
+        ('FAILED', 'Failed')
     ]
 
     file_id = models.CharField(max_length=100, primary_key=True)
     file_name = models.CharField(max_length=255)
-    file_path = models.FileField(upload_to='uploads/%Y/%m/%d/') # Stores the actual file
-    uploaded_by_user_id = models.CharField(max_length=50) # FK to AccountUser.user_id on MAIN DB
+    file_path = models.FileField(upload_to='uploads/%Y/%m/%d/') 
+    uploaded_by_user_id = models.CharField(max_length=50) 
     
     original_record_count = models.IntegerField(default=0)
     unique_record_count = models.IntegerField(default=0)
@@ -48,7 +64,7 @@ class FileUpload(models.Model):
 
 
 class VerificationResult(models.Model):
-    """VERIFICATION_RESULTS - Stores the output of the pipeline (FR20-FR30)"""
+    """VERIFICATION_RESULTS - Stores the output of the pipeline"""
     FINAL_STATUS_CHOICES = [
         ('VALID', 'Valid'), 
         ('INVALID', 'Invalid'), 
@@ -59,19 +75,24 @@ class VerificationResult(models.Model):
     file = models.ForeignKey(FileUpload, on_delete=models.CASCADE, related_name='results')
     email = models.EmailField(db_index=True)
     
-    # Verification Stages Results
+    # --- Verification Stages Results ---
     syntax_status = models.BooleanField(default=False)
     domain_status = models.BooleanField(default=False)
     smtp_status = models.BooleanField(default=False)
+    
+    # Advanced Checks
+    greylisted = models.BooleanField(default=False)
+    smart_verify_status = models.BooleanField(default=False)
+    
     disposable_status = models.BooleanField(default=False)
     catch_all_status = models.BooleanField(default=False)
+    free_mail_status = models.BooleanField(default=False)
     role_based_status = models.BooleanField(default=False)
-
+    
     final_status = models.CharField(max_length=20, choices=FINAL_STATUS_CHOICES, default='UNKNOWN')
     verified_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
-        # Index on file and email for faster retrieval of results per file
         indexes = [
             models.Index(fields=['file', 'email']),
         ]

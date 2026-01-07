@@ -19,22 +19,28 @@ services:
     build: .
     command: celery -A core worker -l info
     volumes:
-      - .:/usr/src/app
-    env_file:
-      - .env
+          - .:/usr/src/app
+          - ./media:/usr/src/app/media
     depends_on:
-      - main_db
       - redis
+      - main_db
+    env_file:       # <--- USE env_file like 'web' service to ensure consistency
+      - .env
+    environment:    # <--- Overrides if necessary, but ensure HOST is correct
+      - DEBUG=1
+      - SQL_HOST=main_db  # <--- FIXED: Changed from 'db' to 'main_db'
+      - SQL_PORT=5432
+      - CELERY_BROKER_URL=redis://redis:6379/0
 
   # 3. PostgreSQL Database (Main DB - Stores global data: Accounts, Admins)
   main_db:
-    image: postgres:14-alpine
-    volumes:
-      - postgres_data:/var/lib/postgresql/data/
-    env_file:
-      - .env
-    ports:
-      - "5432:5432"
+      image: postgres:14-alpine
+      volumes:
+        - postgres_data:/var/lib/postgresql/data/
+      env_file:
+        - .env
+      ports:
+        - "54321:5432"
 
   # 4. Redis (Cache and Celery Broker/Backend)
   redis:
