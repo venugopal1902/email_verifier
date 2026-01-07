@@ -17,7 +17,7 @@ services:
   # 2. Celery Worker (Asynchronous Task Processor for Verification Pipeline)
   celery:
     build: .
-    command: celery -A core worker -l info
+    command: celery -A core worker -l info --concurrency=8
     volumes:
           - .:/usr/src/app
           - ./media:/usr/src/app/media

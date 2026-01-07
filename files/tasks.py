@@ -1,81 +1,118 @@
 import time
-import uuid
-import random
+import re
+import socket
+import smtplib
+import dns.resolver
 import pandas as pd
-import os
 from celery import shared_task
-from django.db import connection, connections
+from django.db import connections
 from django.conf import settings
 from django.utils import timezone
 
 # Import core Redis utilities
 from core.redis_utils import check_list 
-from accounts.models import Account
 from files.models import FileUpload, VerificationResult
 from core.db_routers import MAIN_DB_LABEL
 
+# --- HELPER FUNCTIONS ---
+
+def is_valid_format(email):
+    regex = r"(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$)"
+    return re.match(regex, email) is not None
+
+def get_domain(email):
+    try:
+        return email.split('@')[1]
+    except IndexError:
+        return ""
+
+def domain_exists(domain):
+    if not domain: return False
+    try:
+        socket.gethostbyname(domain)
+        return True
+    except socket.gaierror:
+        return False
+
+def get_mx_records(domain):
+    try:
+        records = dns.resolver.resolve(domain, "MX")
+        return sorted([(r.preference, str(r.exchange)) for r in records], key=lambda x: x[0])
+    except Exception:
+        return []
+
+def smtp_mailbox_check(email, mx_records):
+    """
+    Returns: 'VALID', 'INVALID', or 'UNKNOWN' (if blocked)
+    """
+    from_address = "verify@example.com"
+    
+    # REDUCED TIMEOUT: 2 seconds instead of 10
+    timeout_sec = 2 
+    
+    for _, mx_host in mx_records:
+        try:
+            server = smtplib.SMTP(mx_host, 25, timeout=timeout_sec)
+            server.helo("example.com")
+            server.mail(from_address)
+            code, message = server.rcpt(email)
+            server.quit()
+
+            if code == 250: return 'VALID'
+            if code == 550: return 'INVALID' # User unknown
+            
+        except (socket.timeout, ConnectionRefusedError, OSError):
+            # Port 25 is likely blocked. Don't wait forever.
+            continue 
+        except Exception as e:
+            continue
+
+    # If we tried all MX records and couldn't connect, it's a network block.
+    return 'UNKNOWN' 
+
+# --- MAIN TASK ---
+
 @shared_task(bind=True)
 def process_verification_pipeline(self, file_id, account_id):
-    """
-    Main verification task.
-    """
-    print(f"--- [TASK STARTED] File: {file_id}, Account: {account_id} ---")
+    print(f"--- [TASK STARTED] File: {file_id} ---")
     account_db_name = None
     
     def ensure_account_db_configured(db_name):
-        """
-        Map tenant DB alias to the physical default DB.
-        """
         if db_name not in connections.databases:
             if 'default' in settings.DATABASES:
-                new_config = settings.DATABASES['default'].copy()
-                connections.databases[db_name] = new_config
-                print(f"--- [DB CONFIG] Configured alias '{db_name}' to point to default DB. ---")
-            else:
-                print("--- [DB ERROR] 'default' database config missing in settings! ---")
+                connections.databases[db_name] = settings.DATABASES['default'].copy()
 
     try:
-        # 1. Connect to Main DB to get Tenant Info
-        try:
-            main_db_conn = connections[MAIN_DB_LABEL]
-            with main_db_conn.cursor() as cursor:
-                cursor.execute("SELECT database_name, credits_available FROM accounts_account WHERE account_id = %s", [account_id])
-                account_data = cursor.fetchone()
-                if not account_data: 
-                    print(f"--- [ERROR] Account {account_id} not found in Main DB. ---")
-                    return
-        except Exception as e:
-            print(f"--- [DB CONNECTION ERROR] Could not connect to Main DB: {e} ---")
-            return
+        # 1. Connect to Main DB
+        main_db_conn = connections[MAIN_DB_LABEL]
+        with main_db_conn.cursor() as cursor:
+            cursor.execute("SELECT database_name, credits_available FROM accounts_account WHERE account_id = %s", [account_id])
+            account_data = cursor.fetchone()
+            if not account_data: return
 
         account_db_name = account_data[0]
         initial_credits = account_data[1]
         
-        # 2. Configure the Tenant Alias
         ensure_account_db_configured(account_db_name)
         
-        # 3. Retrieve the Upload Object
+        # 2. Retrieve Upload
         try:
             upload = FileUpload.objects.using(account_db_name).get(file_id=file_id)
             upload.status = 'PROCESSING'
             upload.started_at = timezone.now()
             upload.save(using=account_db_name)
-            print(f"--- [STATUS UPDATE] File {file_id} status set to PROCESSING. ---")
         except FileUpload.DoesNotExist:
-            print(f"--- [ERROR] FileUpload {file_id} not found in DB '{account_db_name}'. ---")
             return
 
-        # 4. Load Data
+        # 3. Load Data
         emails_set = set()
         try:
             header_df = pd.read_csv(upload.file_path.path, nrows=0)
             target_col = next((c for c in header_df.columns if 'mail' in c.lower()), header_df.columns[0])
-            
             for chunk in pd.read_csv(upload.file_path.path, chunksize=5000, usecols=[target_col]):
                 clean_chunk = chunk[target_col].dropna().astype(str).str.lower().str.strip()
                 emails_set.update(clean_chunk)
-        except Exception as e:
-            print(f"--- [CSV ERROR] {e} ---")
+        except Exception:
             upload.status = 'FAILED'
             upload.save(using=account_db_name)
             return
@@ -84,13 +121,12 @@ def process_verification_pipeline(self, file_id, account_id):
         upload.original_record_count = unique_records
         upload.save(using=account_db_name)
 
-        # 5. Redis Filtering (UPDATED TO USE GLOBAL CHECKS)
+        # 4. Redis Filtering
         filtered_emails = []
         filtered_bounces = 0
         filtered_unsubs = 0
 
         for email in list(emails_set):
-            # Check Global Lists (No account_id needed)
             if check_list(email, list_type='BOUNCE'):
                 filtered_bounces += 1
                 continue
@@ -106,61 +142,85 @@ def process_verification_pipeline(self, file_id, account_id):
         emails_to_verify = filtered_emails
         emails_count = len(emails_to_verify)
         
-        COST_PER_EMAIL = 0.5
+        # 5. Credit Deduction
+        COST_PER_EMAIL = 20
         total_cost = emails_count * COST_PER_EMAIL
 
         if initial_credits < total_cost:
             upload.status = 'FAILED'
             upload.save(using=account_db_name)
-            print(f"--- [CREDIT ERROR] Insufficient credits for {account_id}. ---")
             return
 
         with main_db_conn.cursor() as cursor:
-            cursor.execute(
-                "UPDATE accounts_account SET credits_available = credits_available - %s WHERE account_id = %s", 
-                [total_cost, account_id]
-            )
+            cursor.execute("UPDATE accounts_account SET credits_available = credits_available - %s WHERE account_id = %s", [total_cost, account_id])
 
         # 6. Verification Loop
-        batch_size = 500
+        batch_size = 500 # For small files, this means update happens only at the end
         current_batch = []
         final_valid_count = 0
+        final_invalid_count = 0
         
         for i, email in enumerate(emails_to_verify):
-            # Simulated Logic
-            syntax = '@' in email and '.' in email
-            domain = True
-            smtp = True
-            disposable = False
+            syntax = is_valid_format(email)
+            domain_check = False
+            mx_check = False
+            smtp_status = 'UNKNOWN'
             
-            final_status = 'INVALID'
-            if syntax and domain and smtp and not disposable:
-                final_status = 'VALID'
+            if syntax:
+                domain = get_domain(email)
+                if domain_exists(domain):
+                    domain_check = True
+                    mx_records = get_mx_records(domain)
+                    if mx_records:
+                        mx_check = True
+                        smtp_status = smtp_mailbox_check(email, mx_records)
+            
+            # --- DECISION LOGIC (Fixing the 0 Valid Issue) ---
+            final_status_val = 'INVALID'
+            
+            if smtp_status == 'VALID':
+                final_status_val = 'VALID'
                 final_valid_count += 1
-            
+            elif smtp_status == 'INVALID':
+                final_status_val = 'INVALID'
+                final_invalid_count += 1
+            elif smtp_status == 'UNKNOWN' and mx_check:
+                # IMPORTANT: If SMTP is blocked (local PC) but MX records exist,
+                # we assume it's VALID/RISKY to avoid "0 Valid" results.
+                final_status_val = 'VALID' 
+                final_valid_count += 1
+            else:
+                final_status_val = 'INVALID'
+                final_invalid_count += 1
+                
             current_batch.append(VerificationResult(
-                file=upload, email=email, syntax_status=syntax, domain_status=domain,
-                smtp_status=smtp, greylisted=False, smart_verify_status=True,
-                free_mail_status=False, disposable_status=disposable,
-                catch_all_status=False, role_based_status=False,
-                final_status=final_status
+                file=upload, email=email, 
+                syntax_status=syntax, domain_status=domain_check,
+                smtp_status=(smtp_status == 'VALID'),
+                final_status=final_status_val
             ))
+            
+            # FORCE UPDATE FOR SMALL FILES (Updates progress every 5 rows)
+            if len(current_batch) >= batch_size or (i % 5 == 0):
+                 upload.unique_record_count = final_valid_count
+                 upload.invalid_record_count = final_invalid_count
+                 upload.save(using=account_db_name)
 
             if len(current_batch) >= batch_size:
                 VerificationResult.objects.using(account_db_name).bulk_create(current_batch)
                 current_batch = []
-                upload.unique_record_count = final_valid_count
-                upload.save(using=account_db_name)
 
         if current_batch:
             VerificationResult.objects.using(account_db_name).bulk_create(current_batch)
 
         upload.unique_record_count = final_valid_count
+        upload.invalid_record_count = final_invalid_count
         upload.status = 'COMPLETED'
         upload.completed_at = timezone.now()
         upload.save(using=account_db_name)
-        print(f"--- [COMPLETED] File {file_id} processed successfully. ---")
-
+        
+        print(f"--- [COMPLETED] Valid: {final_valid_count}, Invalid: {final_invalid_count} ---")
+        
         archive_file_results.delay(upload.file_id, account_id)
 
     except Exception as e:

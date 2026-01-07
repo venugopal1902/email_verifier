@@ -4,9 +4,6 @@ from django.utils import timezone
 # --- Global Shared Models ---
 
 class BouncedEmail(models.Model):
-    """
-    Global table for all bounced emails from all users.
-    """
     email = models.EmailField(unique=True, db_index=True)
     uploaded_by_user_id = models.CharField(max_length=50, null=True, blank=True) 
     uploaded_at = models.DateTimeField(default=timezone.now)
@@ -19,9 +16,6 @@ class BouncedEmail(models.Model):
 
 
 class UnsubscribedEmail(models.Model):
-    """
-    Global table for all unsubscribed emails from all users.
-    """
     email = models.EmailField(unique=True, db_index=True)
     uploaded_by_user_id = models.CharField(max_length=50, null=True, blank=True)
     uploaded_at = models.DateTimeField(default=timezone.now)
@@ -48,7 +42,8 @@ class FileUpload(models.Model):
     uploaded_by_user_id = models.CharField(max_length=50) 
     
     original_record_count = models.IntegerField(default=0)
-    unique_record_count = models.IntegerField(default=0)
+    unique_record_count = models.IntegerField(default=0)   # Valid Count
+    invalid_record_count = models.IntegerField(default=0)  # <--- NEW FIELD
     filtered_unsub_count = models.IntegerField(default=0)
     filtered_bounce_count = models.IntegerField(default=0)
     

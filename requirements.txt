@@ -6,4 +6,7 @@ redis==5.0.1
 python-dotenv==1.0.0
 django-cors-headers==4.3.0
 pandas==2.1.4 # For CSV processing
+dnspython==2.8.0
+gevent>=23.9.1
+
 # consistent-hash==1.1.2 removed (replaced by local implementation)
