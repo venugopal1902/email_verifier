@@ -176,7 +176,7 @@ def process_verification_pipeline(self, file_id, account_id):
         emails_count = len(emails_to_verify)
         
         # 5. Credits
-        COST_PER_EMAIL = 20
+        COST_PER_EMAIL = 0.1
         total_cost = emails_count * COST_PER_EMAIL
         if initial_credits < total_cost:
             upload.status = 'FAILED'
@@ -196,7 +196,7 @@ def process_verification_pipeline(self, file_id, account_id):
         # Max Workers: 50 is safe for local. Cloud can go higher.
         print(f"--- STARTING THREAD POOL FOR {len(emails_to_verify)} EMAILS ---")
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=500) as executor:
             # Submit all emails to the pool
             future_to_email = {executor.submit(verify_single_email_logic, email): email for email in emails_to_verify}
             
