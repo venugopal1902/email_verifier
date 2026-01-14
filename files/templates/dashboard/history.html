@@ -1,0 +1,31 @@
+<div>
+    <div class="flex justify-between items-end mb-4 px-1">
+        <h2 class="text-xl font-bold text-gray-800 dark:text-white">Recent Verifications</h2>
+        <div id="auto-refresh-indicator" class="hidden flex items-center gap-2 px-3 py-1 bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 rounded-full text-xs font-medium border border-green-100 dark:border-green-800">
+            <span class="relative flex h-2 w-2">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+            </span>
+            Live Updating
+        </div>
+    </div>
+    
+    <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-sm overflow-hidden">
+        <div class="grid grid-cols-12 gap-4 bg-gray-50 dark:bg-gray-700/50 border-b border-gray-200 dark:border-gray-700 p-4 text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+            <div class="col-span-3">File Name</div>
+            <div class="col-span-2 text-center">Status</div>
+            <div class="col-span-1 text-center">Progress</div>
+            <div class="col-span-1 text-center text-red-600 dark:text-red-400">Bounced</div>
+            <div class="col-span-1 text-center text-orange-600 dark:text-orange-400">Unsub</div>
+            <div class="col-span-1 text-center text-red-600 dark:text-red-400">Invalid</div>
+            <div class="col-span-1 text-center text-green-600 dark:text-green-400">Valid</div>
+            <div class="col-span-2 text-right">Download</div>
+        </div>
+
+        <div id="status-area" class="divide-y divide-gray-100 dark:divide-gray-700 max-h-[600px] overflow-y-auto">
+            <div class="p-12 text-center text-gray-400 text-sm flex flex-col items-center">
+                Loading history...
+            </div>
+        </div>
+    </div>
+</div>

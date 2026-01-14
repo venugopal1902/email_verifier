@@ -198,7 +198,7 @@ def process_batch(email_list, file_id, db_name):
     # Run Parallel Checks
     # pool.map returns a list in order. If verify_single_email_logic never crashes,
     # we get 1 result per email.
-    pool = Pool(50)
+    pool = Pool(MAX_CONCURRENCY)
     results = pool.map(verify_single_email_logic, email_list)
     
     db_objs = []

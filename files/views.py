@@ -10,6 +10,7 @@ from django.contrib.auth import get_user_model
 from django.conf import settings
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
+from django.utils import timezone
 
 # Models
 from accounts.models import Account
@@ -81,7 +82,8 @@ class FileUploadView(views.APIView):
             file_name=file_obj.name,
             file_path=file_obj,
             uploaded_by_user_id=str(user.pk),
-            status='UPLOADED'
+            status='UPLOADED',
+            started_at=timezone.now()
         )
         
         # --- CHANGED: Call the NEW task ---
