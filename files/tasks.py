@@ -4,6 +4,7 @@ import smtplib
 import dns.resolver
 import pandas as pd
 from celery import shared_task
+import subprocess
 from django.db.models import F
 from django.utils import timezone
 from gevent.pool import Pool
@@ -14,6 +15,14 @@ import socket
 # --- IMPORT REDIS UTILS ---
 from core.redis_utils import check_list 
 from files.models import FileUpload, VerificationResult
+BATCH_SIZE = 100
+DNS_TIMEOUT = 2.0     # Fail fast (2s) instead of waiting 30s
+MAX_CONCURRENCY = 50  # Greenlets per task (since you have 200 workers, 200*50 is plenty)
+
+# Configure Global DNS Resolver
+resolver = dns.resolver.Resolver()
+resolver.timeout = DNS_TIMEOUT
+resolver.lifetime = DNS_TIMEOUT
 
 # --- 1. CORE HELPER FUNCTIONS (SAFER PURE PYTHON DNS) ---
 
@@ -182,7 +191,7 @@ def configure_account_db(account_db_name):
 
 # --- 4. BATCH WORKER ---
 
-@shared_task(rate_limit="300/s")
+@shared_task(rate_limit="600/s")
 def process_batch(email_list, file_id, db_name):
     configure_account_db(db_name)
     
@@ -260,29 +269,35 @@ def dispatch_file_processing(file_id, account_id):
     upload = FileUpload.objects.using(db_name).get(file_id=file_id)
     upload.status = 'PROCESSING'
     
-    # 1. Update total count accurately first
+    # [OPTIMIZATION] Fast Line Count (Linux/Docker specific)
     try:
-        df = pd.read_csv(upload.file_path.path)
-        cols = [c for c in df.columns if 'mail' in c.lower()]
-        col = cols[0] if cols else df.columns[0]
-        # Count all non-null emails
-        total_records = df[col].dropna().count()
+        # 'wc -l' is instant even for million-line files
+        result = subprocess.check_output(['wc', '-l', upload.file_path.path])
+        total_records = int(result.split()[0]) - 1 # Subtract header
+        if total_records < 1: total_records = 1
         
         upload.original_record_count = total_records
         upload.save(using=db_name)
-    except Exception:
-        # Keep existing count if pandas fails (unlikely)
-        pass
+        print(f"--- [DISPATCH] Fast count found {total_records} rows ---")
+    except Exception as e:
+        print(f"--- [DISPATCH] Fast count failed ({e}), falling back to pandas ---")
+        # Fallback (Slow)
+        try:
+            df = pd.read_csv(upload.file_path.path)
+            upload.original_record_count = len(df)
+            upload.save(using=db_name)
+        except: pass
 
+    # Dispatch Chunks
     try:
-        # Process in chunks
-        for chunk in pd.read_csv(upload.file_path.path, chunksize=2000):
+        for chunk in pd.read_csv(upload.file_path.path, chunksize=BATCH_SIZE):
             cols = [c for c in chunk.columns if 'mail' in c.lower()]
             col = cols[0] if cols else chunk.columns[0]
-            
             emails = chunk[col].dropna().astype(str).str.strip().tolist()
+            
             if emails:
                 process_batch.delay(emails, file_id, db_name)
+                
     except Exception as e:
         print(f"Dispatch Error: {e}")
         upload.status = 'FAILED'
