@@ -1,0 +1,15 @@
+docker tag email-verifier venugopal1902/email_verifier  
+docker build -t email-verifier:latest .    
+
+ docker push  venugopal1902/email_verifier 
+
+ kubectl apply -f web-deployment.yaml     
+
+ kubectl delete deployment web celery-worker  
+
+
+
+ $WEB_POD = kubectl get pods -l app=web -o jsonpath="{.items[0].metadata.name}"
+PS C:\Users\venug\Desktop\email_verifier>  kubectl port-forward $WEB_POD 8000:8000
+Forwarding from 127.0.0.1:8000 -> 8000
+Forwarding from [::1]:8000 -> 8000                     

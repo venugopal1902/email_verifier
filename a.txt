@@ -1,3 +1,13 @@
+250 , 35 , 100, 6 --> 7 min 13 sec 52k
+200, 15, 100, 8 --> 7 min 45 sec
+200, 15, 100, 7 --> 8 min 30 sec
+200, 15, 200, 7 --> 7 min 20 sec
+200, 15, 500, 7 --> 7 min 56 sec
+
+200, 15, 500, 7 --> 7 min 56 sec 3.1lakh
+
+
+
 This is a fantastic and challenging project! I will set up a robust, scalable architecture using Python (Django) and Docker, integrating PostgreSQL (for core SQL data) and Redis (for caching and the Celery task queue, as recommended).
 
 Due to the complexity and the "database isolation per account" requirement, I'm providing a complete, multi-file structure focusing on the architectural backbone, including **database routing** (the critical part for multi-tenancy) and **asynchronous processing** for the verification pipeline.

@@ -1,0 +1,173 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  DEBUG: "1"
+  # Database Config
+  SQL_ENGINE: "django.db.backends.postgresql"
+  SQL_DATABASE: "hello_django_dev"
+  SQL_USER: "hello_django"
+  SQL_PASSWORD: "hello_django"
+  SQL_HOST: "postgres"
+  SQL_PORT: "5432"
+  # Redis Config
+  CELERY_BROKER_URL: "redis://redis:6379/0"
+  REDIS_SERVICE_PORT: "6379"
+
+---
+# --- 1. SHARED VOLUME (FOR CSV FILES) ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media-pvc  # <--- NEW SHARED STORAGE
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# --- 2. DATABASE ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:13
+        env:
+        - name: POSTGRES_USER
+          value: "hello_django"
+        - name: POSTGRES_PASSWORD
+          value: "hello_django"
+        - name: POSTGRES_DB
+          value: "hello_django_dev"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  ports:
+  - port: 5432
+  selector:
+    app: postgres
+
+---
+# --- 3. REDIS ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+spec:
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:6-alpine
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  ports:
+  - port: 6379
+  selector:
+    app: redis
+
+---
+# --- 4. WEB APP ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+      - name: web
+        image: venugopal1902/email_verifier:latest
+        imagePullPolicy: Never
+        command: ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: app-config
+        volumeMounts:           # <--- MOUNT SHARED FOLDER
+        - mountPath: /usr/src/app/media
+          name: media-storage
+      volumes:
+      - name: media-storage
+        persistentVolumeClaim:
+          claimName: media-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8000
+  selector:
+    app: web
+
+---
+# --- 5. CELERY WORKER ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  replicas: 7
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+      - name: worker
+        image: venugopal1902/email_verifier:latest
+        imagePullPolicy: Never
+        command: ["celery", "-A", "core", "worker", "-l", "info", "-P", "gevent", "-c", "500"]
+        envFrom:
+        - configMapRef:
+            name: app-config
+        volumeMounts:           # <--- MOUNT SAME FOLDER HERE
+        - mountPath: /usr/src/app/media
+          name: media-storage
+      volumes:
+      - name: media-storage
+        persistentVolumeClaim:
+          claimName: media-pvc

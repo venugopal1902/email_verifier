@@ -5,7 +5,8 @@ from .consistent_hash import ConsistentHash
 
 # Initialize Redis connection parameters from .env
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
-REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
+# REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
+REDIS_PORT = int(os.getenv('REDIS_SERVICE_PORT', 6379))
 
 # --- Consistent Hashing Configuration ---
 # Simulating sharding using different Redis logical Databases on the same host.

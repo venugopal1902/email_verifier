@@ -11,13 +11,15 @@ from gevent.pool import Pool
 from django.db import connections
 from django.conf import settings
 import socket
+# from gevent import monkey
 
 # --- IMPORT REDIS UTILS ---
 from core.redis_utils import check_list 
 from files.models import FileUpload, VerificationResult
-BATCH_SIZE = 100
+# monkey.patch_all()
+BATCH_SIZE = 200
 DNS_TIMEOUT = 2.0     # Fail fast (2s) instead of waiting 30s
-MAX_CONCURRENCY = 50  # Greenlets per task (since you have 200 workers, 200*50 is plenty)
+MAX_CONCURRENCY = 15  # Greenlets per task (since you have 200 workers, 100*15 is plenty)
 
 # Configure Global DNS Resolver
 resolver = dns.resolver.Resolver()
