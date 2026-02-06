@@ -1,0 +1,82 @@
+# version: '3.8'
+services:
+  # 1. Main Django Application (Web API)
+  web:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/usr/src/app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - main_db
+      - redis
+
+  # 2. Celery Worker (Asynchronous Task Processor for Verification Pipeline)
+  # celery:
+  #   build: .
+  #   command: celery -A core worker -l info --pool=gevent --concurrency=500
+  #   volumes:
+  #         - .:/usr/src/app
+  #         - ./media:/usr/src/app/media
+  #   depends_on:
+  #     - redis
+  #     - main_db
+  #   env_file:       # <--- USE env_file like 'web' service to ensure consistency
+  #     - .env
+  #   environment:    # <--- Overrides if necessary, but ensure HOST is correct
+  #     - DEBUG=1
+  #     - SQL_HOST=main_db  # <--- FIXED: Changed from 'db' to 'main_db'
+  #     - SQL_PORT=5432
+  #     - CELERY_BROKER_URL=redis://redis:6379/0
+  celery_io:
+      build: .
+      command: celery -A core worker -l info -Q io --pool=gevent --concurrency=200
+      depends_on:
+        - redis
+        - main_db
+      env_file:
+        - .env
+      volumes:
+        - .:/usr/src/app
+      environment:    # <--- Overrides if necessary, but ensure HOST is correct
+        - DEBUG=1
+        - SQL_HOST=main_db  # <--- FIXED: Changed from 'db' to 'main_db'
+        - SQL_PORT=5432
+        - CELERY_BROKER_URL=redis://redis:6379/0
+  celery_cpu:
+      build: .
+      command: celery -A core worker -l info -Q cpu --concurrency=4 # Keep this <= to your CPU cores
+      depends_on:
+        - redis
+        - main_db
+      env_file:
+        - .env
+      volumes:
+        - .:/usr/src/app
+      environment:    # <--- Overrides if necessary, but ensure HOST is correct
+        - DEBUG=1
+        - SQL_HOST=main_db  # <--- FIXED: Changed from 'db' to 'main_db'
+        - SQL_PORT=5432
+        - CELERY_BROKER_URL=redis://redis:6379/0        
+  # 3. PostgreSQL Database (Main DB - Stores global data: Accounts, Admins)
+  main_db:
+      image: postgres:14-alpine
+      volumes:
+        - postgres_data:/var/lib/postgresql/data/
+      env_file:
+        - .env
+      ports:
+        - "54321:5432"
+
+  # 4. Redis (Cache and Celery Broker/Backend)
+  redis:
+    image: redis:6-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+
+volumes:
+  postgres_data:

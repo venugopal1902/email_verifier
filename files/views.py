@@ -17,7 +17,7 @@ from accounts.models import Account
 from files.models import FileUpload, BouncedEmail, UnsubscribedEmail, VerificationResult
 
 # --- CHANGED: Import the NEW task name ---
-from files.tasks import dispatch_file_processing 
+from files.tasks import process_file_initialization
 
 from core.redis_utils import add_to_list, delete_from_list
 from .serializers import FileListSerializer 
@@ -67,29 +67,22 @@ class CreditBalanceView(views.APIView):
 @method_decorator(csrf_exempt, name='dispatch')
 class FileUploadView(views.APIView):
     authentication_classes = [] 
-    def post(self, request):
-        user, account = get_user_and_account_data_from_request(request)
-        if not account: return Response(status=401)
-        
-        file_obj = request.FILES.get('file')
-        if not file_obj: return Response(status=400)
-        
-        configure_account_db(account.database_name)
-        
-        # Save File Record
-        upload = FileUpload.objects.using(account.database_name).create(
-            file_id=str(uuid.uuid4()),
-            file_name=file_obj.name,
-            file_path=file_obj,
-            uploaded_by_user_id=str(user.pk),
-            status='UPLOADED',
-            started_at=timezone.now()
-        )
-        
-        # --- CHANGED: Call the NEW task ---
-        dispatch_file_processing.delay(upload.file_id, account.account_id)
-        
-        return Response(FileListSerializer(upload).data, status=202)
+    def post(self, request, format=None):
+            serializer = FileListSerializer(data=request.data)
+            if serializer.is_valid():
+                file_obj = serializer.save(uploaded_by=request.user)
+                
+                # --- CRITICAL LINE ---
+                # 1. Use the new task name: process_file_initialization
+                # 2. Force it to the 'cpu' queue (because it reads the CSV)
+                process_file_initialization.apply_async(
+                    args=[file_obj.id], 
+                    queue='cpu' 
+                )
+                # ---------------------
+                
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 @method_decorator(csrf_exempt, name='dispatch')
 class FileStatusView(views.APIView):
