@@ -1,222 +1,141 @@
-import uuid
-import copy
+import logging
 import csv
-import pandas as pd
-from django.http import StreamingHttpResponse
-from rest_framework import views, status, serializers
+from django.http import StreamingHttpResponse, HttpResponse
+from rest_framework import views, status, generics, permissions
 from rest_framework.response import Response
-from django.db import connections
-from django.contrib.auth import get_user_model
-from django.conf import settings
-from django.utils.decorators import method_decorator
-from django.views.decorators.csrf import csrf_exempt
-from django.utils import timezone
+from rest_framework.parsers import MultiPartParser, FormParser
+from django.shortcuts import get_object_or_404
+from django.db.models import F
 
-# Models
-from accounts.models import Account
-from files.models import FileUpload, BouncedEmail, UnsubscribedEmail, VerificationResult
+# Models & Serializers
+from files.models import FileUpload, VerificationResult
+from accounts.models import Account  # Assuming Account holds credits
+from .serializers import FileListSerializer
 
-# --- CHANGED: Import the NEW task name ---
+# Tasks
 from files.tasks import process_file_initialization
 
-from core.redis_utils import add_to_list, delete_from_list
-from .serializers import FileListSerializer 
+logger = logging.getLogger(__name__)
 
-User = get_user_model()
-
-# --- Utility Functions ---
-def get_user_and_account_data_from_request(request):
-    auth_header = request.headers.get('Authorization')
-    token = None
-    
-    # 1. Check Header (Standard API calls)
-    if auth_header and auth_header.startswith('Bearer '):
-        token = auth_header.split(' ')[1]
-    # 2. Check Query Param (For CSV Download Links)
-    elif request.GET.get('token'): 
-        token = request.GET.get('token')
-        
-    if not token: return None, None
-    
-    try:
-        user_id = int(token.split('_')[1])
-        user = User.objects.get(pk=user_id)
-        return user, user.account
-    except:
-        return None, None
-
-def configure_account_db(account_db_name):
-    if account_db_name in connections.databases: return True
-    try:
-        default_config = settings.DATABASES['default'].copy()
-        connections.databases[account_db_name] = default_config
-        return True
-    except: return False
-
-# --- Views ---
-
-@method_decorator(csrf_exempt, name='dispatch')
-class CreditBalanceView(views.APIView):
-    authentication_classes = []
-    def get(self, request):
-        user, account = get_user_and_account_data_from_request(request)
-        if not account: return Response(status=401)
-        account.refresh_from_db()
-        return Response({"credits": account.credits_available})
-
-@method_decorator(csrf_exempt, name='dispatch')
+# ==============================================================================
+# 1. FILE UPLOAD VIEW
+# ==============================================================================
 class FileUploadView(views.APIView):
-    authentication_classes = [] 
+    parser_classes = [MultiPartParser, FormParser]
+    permission_classes = [permissions.IsAuthenticated]
+
     def post(self, request, format=None):
-            serializer = FileListSerializer(data=request.data)
-            if serializer.is_valid():
+        print(f"\n[WEB DEBUG] >>> Upload Received from user: {request.user}")
+        
+        serializer = FileListSerializer(data=request.data)
+        
+        if serializer.is_valid():
+            try:
+                # 1. Save to DB
                 file_obj = serializer.save(uploaded_by=request.user)
+                print(f"[WEB DEBUG] File Saved. ID: {file_obj.id}")
                 
-                # --- CRITICAL LINE ---
-                # 1. Use the new task name: process_file_initialization
-                # 2. Force it to the 'cpu' queue (because it reads the CSV)
+                # 2. Dispatch Task (CPU Queue)
+                print(f"[WEB DEBUG] Sending task to CPU queue...")
                 process_file_initialization.apply_async(
                     args=[file_obj.id], 
                     queue='cpu' 
                 )
-                # ---------------------
                 
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                print(f"[WEB CRITICAL] Error: {str(e)}")
+                return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-@method_decorator(csrf_exempt, name='dispatch')
+# ==============================================================================
+# 2. LIST VIEWS (Providing both names to prevent ImportErrors)
+# ==============================================================================
+class ListUploadView(generics.ListAPIView):
+    serializer_class = FileListSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return FileUpload.objects.filter(uploaded_by=self.request.user).order_by('-uploaded_at')
+
+# Alias for backward compatibility if urls.py uses 'FileListView'
+class FileListView(ListUploadView):
+    pass
+
+# ==============================================================================
+# 3. FILE STATUS VIEW (Polling Endpoint)
+# ==============================================================================
 class FileStatusView(views.APIView):
-    authentication_classes = []
+    permission_classes = [permissions.IsAuthenticated]
+
     def get(self, request, file_id):
-        user, account = get_user_and_account_data_from_request(request)
-        if not account: return Response(status=401)
-        configure_account_db(account.database_name)
         try:
-            upload = FileUpload.objects.using(account.database_name).get(
-                file_id=file_id, 
-                uploaded_by_user_id=str(user.pk)
-            )
-            return Response(FileListSerializer(upload).data)
-        except: return Response(status=404)
-
-@method_decorator(csrf_exempt, name='dispatch')
-class FileListView(views.APIView):
-    authentication_classes = []
-    def get(self, request):
-        user, account = get_user_and_account_data_from_request(request)
-        if not account: return Response(status=401)
-        
-        configure_account_db(account.database_name)
-        
-        uploads = FileUpload.objects.using(account.database_name).filter(
-            uploaded_by_user_id=str(user.pk)
-        ).order_by('-started_at')
-        
-        return Response({"files": FileListSerializer(uploads, many=True).data})
-
-@method_decorator(csrf_exempt, name='dispatch')
-class ListUploadView(views.APIView):
-    authentication_classes = []
-    def post(self, request, list_type):
-        user, account = get_user_and_account_data_from_request(request)
-        if not account: return Response(status=401)
-        
-        file_obj = request.FILES.get('file')
-        if not file_obj: return Response({"error": "No file"}, status=400)
-
-        if list_type == 'bounce':
-            ModelClass = BouncedEmail
-        elif list_type == 'unsub':
-            ModelClass = UnsubscribedEmail
-        else:
-            return Response({"error": "Invalid list type"}, status=400)
-
-        try:
-            header_df = pd.read_csv(file_obj, nrows=0)
-            email_col = next((c for c in header_df.columns if 'mail' in c.lower()), header_df.columns[0])
-            if hasattr(file_obj, 'seek'): file_obj.seek(0)
-
-            chunk_size = 5000
-            redis_count = 0
-            total_processed = 0
-            
-            for chunk in pd.read_csv(file_obj, chunksize=chunk_size, usecols=[email_col]):
-                emails = chunk[email_col].dropna().astype(str).str.lower().str.strip().unique()
-                if len(emails) == 0: continue
-
-                for email in emails:
-                    if add_to_list(email, list_type.upper(), str(user.pk)):
-                        redis_count += 1
-
-                db_objs = [
-                    ModelClass(email=email, uploaded_by_user_id=str(user.pk)) 
-                    for email in emails
-                ]
-                ModelClass.objects.using('default').bulk_create(db_objs, ignore_conflicts=True)
-                total_processed += len(emails)
-
+            file_obj = FileUpload.objects.get(id=file_id, uploaded_by=request.user)
             return Response({
-                "status": "success",
-                "added_to_redis": redis_count,
-                "processed_rows": total_processed,
-                "message": f"Updated {list_type} list (Global)."
-            }, status=200)
+                "id": file_obj.id,
+                "status": file_obj.status,
+                "processed": file_obj.processed_records,
+                "total": file_obj.total_records,
+                "valid": file_obj.valid_count,
+                "invalid": file_obj.invalid_count
+            }, status=status.HTTP_200_OK)
+        except FileUpload.DoesNotExist:
+            return Response({"error": "File not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        except Exception as e:
-            return Response({"error": str(e)}, status=500)
-
-@method_decorator(csrf_exempt, name='dispatch')
+# ==============================================================================
+# 4. DELETE VIEW
+# ==============================================================================
 class ListDeleteView(views.APIView):
-    authentication_classes = []
-    def delete(self, request, list_type, email):
-        user, account = get_user_and_account_data_from_request(request)
-        if not account: return Response(status=401)
-        
-        delete_from_list(email, list_type.upper())
-        
-        ModelClass = BouncedEmail if list_type == 'bounce' else UnsubscribedEmail
-        
-        ModelClass.objects.using('default').filter(
-            email=email, 
-            uploaded_by_user_id=str(user.pk)
-        ).delete()
+    permission_classes = [permissions.IsAuthenticated]
 
-        return Response({"status": "deleted"}, status=200)
+    def delete(self, request, pk):
+        # Note: 'pk' is standard for generic views, 'file_id' for custom. 
+        # We try both to be safe.
+        id_to_delete = pk if pk else request.GET.get('id')
+        
+        try:
+            file_obj = FileUpload.objects.get(id=id_to_delete, uploaded_by=request.user)
+            file_obj.delete() 
+            return Response({"status": "deleted"}, status=status.HTTP_200_OK)
+        except FileUpload.DoesNotExist:
+            return Response({"error": "File not found"}, status=status.HTTP_404_NOT_FOUND)
 
-@method_decorator(csrf_exempt, name='dispatch')
+# ==============================================================================
+# 5. CREDIT BALANCE VIEW
+# ==============================================================================
+class CreditBalanceView(views.APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        try:
+            # Attempt to find Account associated with user
+            account = Account.objects.filter(user=request.user).first()
+            credits = account.credits if account else 0
+            
+            return Response({"credits": credits}, status=status.HTTP_200_OK)
+        except Exception as e:
+            # Fallback if no Account model exists yet
+            return Response({"credits": 0, "error": str(e)}, status=status.HTTP_200_OK)
+
+# ==============================================================================
+# 6. DOWNLOAD CSV VIEW
+# ==============================================================================
 class DownloadValidCsvView(views.APIView):
-    authentication_classes = []
+    permission_classes = [permissions.IsAuthenticated]
     
     def get(self, request, file_id):
-        user, account = get_user_and_account_data_from_request(request)
-        if not account: return Response(status=401)
-        
-        configure_account_db(account.database_name)
-        
-        try:
-            upload = FileUpload.objects.using(account.database_name).get(
-                file_id=file_id, 
-                uploaded_by_user_id=str(user.pk)
-            )
-        except FileUpload.DoesNotExist:
-            return Response({"error": "File not found"}, status=404)
+        file_obj = get_object_or_404(FileUpload, id=file_id, uploaded_by=request.user)
 
-        valid_emails = VerificationResult.objects.using(account.database_name).filter(
-            file=upload,
-            final_status='VALID'
-        ).values_list('email', flat=True).iterator(chunk_size=5000)
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = f'attachment; filename="verified_{file_id}.csv"'
 
-        class Echo:
-            def write(self, value): return value
-        
-        pseudo_buffer = Echo()
-        writer = csv.writer(pseudo_buffer)
-        
-        def stream():
-            yield writer.writerow(['Email Address']) 
-            for email in valid_emails:
-                yield writer.writerow([email])
+        writer = csv.writer(response)
+        writer.writerow(['Email Address', 'Status']) 
 
-        response = StreamingHttpResponse(stream(), content_type="text/csv")
-        response['Content-Disposition'] = f'attachment; filename="{upload.file_name}_valid.csv"'
+        results = VerificationResult.objects.filter(file=file_obj).iterator()
+        
+        for res in results:
+            writer.writerow([res.email, res.final_status])
+
         return response

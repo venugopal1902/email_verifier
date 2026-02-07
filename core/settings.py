@@ -160,7 +160,33 @@ USE_I18N = True
 
 USE_TZ = True
 
+# --- ADD THIS TO THE BOTTOM OF core/settings.py ---
 
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'INFO',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': True,
+        },
+        'celery': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': True,
+        },
+    },
+}
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
@@ -175,3 +201,5 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Media root for file uploads (must be persistent outside the container in production)
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 MEDIA_URL = '/media/'
+
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True

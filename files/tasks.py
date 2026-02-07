@@ -5,18 +5,36 @@ import dns.resolver
 import pandas as pd
 import subprocess
 import logging
-import socket
+import functools
+import traceback
 from celery import shared_task, chord
 from django.db.models import F
-from core.redis_utils import check_list
 from files.models import FileUpload
+import socket
+
+# --- DEBUG DECORATOR (Copy this) ---
+def log_debug(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        print(f"\n[DEBUG] >>> STARTING: {func.__name__}")
+        print(f"[DEBUG] Args: {args}")
+        try:
+            result = func(*args, **kwargs)
+            print(f"[DEBUG] <<< SUCCESS: {func.__name__}\n")
+            return result
+        except Exception as e:
+            print(f"\n[CRITICAL FAILURE] inside {func.__name__}")
+            print(f"ERROR: {str(e)}")
+            traceback.print_exc()  # PRINTS THE EXACT ERROR LINE
+            raise e
+    return wrapper
+# -----------------------------------
 
 logger = logging.getLogger(__name__)
 
 # --- CONFIGURATION ---
-BATCH_SIZE = 500          # Larger batches reduce Redis overhead
-DNS_TIMEOUT = 2.0         # Fail fast
-MAX_CONCURRENCY = 20      # Greenlets per worker task
+BATCH_SIZE = 500
+DNS_TIMEOUT = 2.0
 
 # Configure Global DNS
 resolver = dns.resolver.Resolver()
@@ -24,152 +42,139 @@ resolver.timeout = DNS_TIMEOUT
 resolver.lifetime = DNS_TIMEOUT
 
 # ---------------------------------------------------------
-# 1. MANAGER TASK (CPU Queue)
-# Reads file, counts rows, and triggers the parallel workers
+# 1. MANAGER TASK
 # ---------------------------------------------------------
 @shared_task(queue='cpu')
+@log_debug  # <--- THIS WILL PRINT LOGS
 def process_file_initialization(file_id):
+    # 1. Fetch File
+    print(f"[STEP 1] Fetching FileUpload with ID: {file_id}")
+    upload = FileUpload.objects.get(id=file_id)
+    
+    upload.status = 'Processing'
+    upload.processed_records = 0
+    upload.save()
+
     try:
-        # 1. Setup
-        upload = FileUpload.objects.get(id=file_id)
-        upload.status = 'Processing'
-        upload.processed_records = 0
-        upload.valid_count = 0
-        upload.invalid_count = 0
-        upload.save()
-
         file_path = upload.file.path
-        total_records = 0
-
-        # 2. Fast Count (Linux/Docker Optimization)
-        try:
-            # wc -l is instant for large files
-            result = subprocess.check_output(['wc', '-l', file_path])
-            total_records = int(result.split()[0]) - 1 # Subtract header
-        except Exception:
-            # Fallback for Windows/Errors
-            try:
-                df = pd.read_csv(file_path)
-                total_records = len(df)
-            except:
-                total_records = 0
+    except AttributeError:
+        # Sometimes people name the field 'file_path' instead of 'file'
+        file_path = upload.file_path.path
         
-        if total_records < 1: total_records = 1
-        upload.total_records = total_records
-        upload.save()
+    print(f"[STEP 2] File Path found: {file_path}")
 
-        # 3. Create the Job List (Signatures)
-        # We do NOT run .delay() here. We just create the list.
-        task_signatures = []
-        
-        # Read in chunks (Memory Safe)
-        for chunk in pd.read_csv(file_path, chunksize=BATCH_SIZE):
-            # Normalize column names to find email
-            cols = [c for c in chunk.columns if 'mail' in c.lower()]
-            col = cols[0] if cols else chunk.columns[0]
-            
-            # Extract valid email strings
-            emails = chunk[col].dropna().astype(str).tolist()
-            
-            if emails:
-                # Add to list
-                task_signatures.append(verify_email_batch.s(file_id, emails))
-
-        # 4. EXECUTE THE CHORD
-        # This is the magic. It runs all batches, then GUARANTEES finalize_file runs.
-        logger.info(f"Dispatching {len(task_signatures)} tasks for File {file_id}")
-        chord(task_signatures)(finalize_file.s(file_id))
-
+    # 2. Count Rows
+    total_records = 0
+    try:
+        print("[STEP 3] Attempting fast count (wc -l)...")
+        result = subprocess.check_output(['wc', '-l', file_path])
+        total_records = int(result.split()[0]) - 1 
     except Exception as e:
-        logger.error(f"Initialization Failed for {file_id}: {e}")
-        upload = FileUpload.objects.get(id=file_id)
+        print(f"[WARN] wc -l failed ({e}), switching to pandas...")
+        df = pd.read_csv(file_path)
+        total_records = len(df)
+    
+    if total_records < 1: total_records = 1
+    
+    print(f"[STEP 4] Total Records: {total_records}")
+    upload.total_records = total_records
+    upload.save()
+
+    # 3. Create Tasks
+    print("[STEP 5] Reading CSV and creating batches...")
+    task_signatures = []
+    
+    batch_count = 0
+    for chunk in pd.read_csv(file_path, chunksize=BATCH_SIZE):
+        # Normalize Headers
+        cols = [c for c in chunk.columns if 'mail' in c.lower()]
+        col = cols[0] if cols else chunk.columns[0]
+        
+        emails = chunk[col].dropna().astype(str).tolist()
+        
+        if emails:
+            # Create a signature (task definition)
+            task_signatures.append(verify_email_batch.s(file_id, emails))
+            batch_count += 1
+
+    print(f"[STEP 6] Batches Created: {batch_count}. Dispatching Chord...")
+    
+    # 4. Fire Chord
+    if task_signatures:
+        chord(task_signatures)(finalize_file.s(file_id))
+        print("[STEP 7] Chord Dispatched Successfully.")
+    else:
+        print("[WARN] No emails found in file!")
         upload.status = 'Failed'
         upload.save()
 
 # ---------------------------------------------------------
-# 2. WORKER TASK (I/O Queue)
-# Verifies a batch of emails. DOES NOT check for completion.
+# 2. WORKER TASK
 # ---------------------------------------------------------
 @shared_task(queue='io', bind=True)
 def verify_email_batch(self, file_id, email_list):
+    # We remove @log_debug here to avoid spamming logs 
+    # (since this runs 1000s of times)
     valid_count = 0
     invalid_count = 0
     
-    # Process batch (using internal gevent pool if needed, or sequential)
-    # Since you likely run celery with -P gevent, sequential here is fine 
-    # because the Worker itself is already concurrent.
     for email in email_list:
         if verify_single_email(email):
             valid_count += 1
         else:
             invalid_count += 1
 
-    # Atomic Update (Stateless)
-    # We allow the database to handle the math safely.
     FileUpload.objects.filter(id=file_id).update(
         processed_records=F('processed_records') + len(email_list),
         valid_count=F('valid_count') + valid_count,
         invalid_count=F('invalid_count') + invalid_count
     )
-    
-    return True # Return value is passed to the chord callback (optional)
+    return True
 
 # ---------------------------------------------------------
-# 3. FINALIZER TASK (CPU Queue)
-# Runs ONLY when all workers are done.
+# 3. FINALIZER TASK
 # ---------------------------------------------------------
 @shared_task(queue='cpu')
+@log_debug # <--- Add logs here too
 def finalize_file(results, file_id):
-    try:
-        logger.info(f"Finalizing File {file_id}...")
-        upload = FileUpload.objects.get(id=file_id)
+    print(f"[FINALIZER] Finishing File {file_id}...")
+    upload = FileUpload.objects.get(id=file_id)
+    
+    upload.refresh_from_db()
+    
+    # Sync counts for UI prettiness
+    if upload.processed_records < upload.total_records:
+        upload.processed_records = upload.total_records
         
-        # Double check: Ensure 100% stats for UI
-        upload.refresh_from_db()
-        if upload.processed_records < upload.total_records:
-            upload.processed_records = upload.total_records
-            
-        upload.status = 'Completed'
-        upload.save()
-        
-    except Exception as e:
-        logger.error(f"Finalization failed for {file_id}: {e}")
+    upload.status = 'Completed'
+    upload.save()
+    print("[FINALIZER] Status set to COMPLETED.")
 
 # ---------------------------------------------------------
-# 4. HELPER FUNCTIONS
+# 4. HELPER
 # ---------------------------------------------------------
 def verify_single_email(email):
-    """ Returns True (Valid) or False (Invalid) """
     try:
-        # 1. Syntax
-        if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
-            return False
-
+        # Syntax
+        if not re.match(r"[^@]+@[^@]+\.[^@]+", email): return False
+        
         domain = email.split('@')[1]
-
-        # 2. DNS MX
+        
+        # DNS
         try:
             records = resolver.resolve(domain, 'MX')
             mx_record = str(records[0].exchange)
-        except:
-            return False # No Domain = Invalid
+        except: return False
 
-        # 3. SMTP Ping
-        server = smtplib.SMTP(timeout=3) # Short timeout
-        server.set_debuglevel(0)
-        
-        code = 0
+        # SMTP
         try:
+            server = smtplib.SMTP(timeout=3)
+            server.set_debuglevel(0)
             server.connect(mx_record)
             server.helo(socket.gethostname())
             server.mail('test@example.com')
             code, _ = server.rcpt(email)
             server.quit()
-        except:
-            return False # Connection Error = Invalid/Risky
-
-        # 250 = OK
-        return code == 250
-
-    except Exception:
-        return False
+            return code == 250
+        except: return False
+    except: return False
