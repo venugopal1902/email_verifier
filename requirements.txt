@@ -8,5 +8,6 @@ django-cors-headers==4.3.0
 pandas==2.1.4 # For CSV processing
 dnspython==2.8.0
 gevent>=23.9.1
+django-celery-results
 
 # consistent-hash==1.1.2 removed (replaced by local implementation)
