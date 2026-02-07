@@ -1,6 +1,6 @@
 import logging
 import csv
-from django.http import StreamingHttpResponse, HttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
 from rest_framework import views, status, generics, permissions
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -9,7 +9,7 @@ from django.db.models import F
 
 # Models & Serializers
 from files.models import FileUpload, VerificationResult
-from accounts.models import Account  # Assuming Account holds credits
+from accounts.models import Account  
 from .serializers import FileListSerializer
 
 # Tasks
@@ -25,32 +25,36 @@ class FileUploadView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, format=None):
-        print(f"\n[WEB DEBUG] >>> Upload Received from user: {request.user}")
+        print(f"\n[WEB DEBUG] >>> Upload Received from: {request.user}")
         
         serializer = FileListSerializer(data=request.data)
-        
         if serializer.is_valid():
             try:
-                # 1. Save to DB
+                # 1. Save File
                 file_obj = serializer.save(uploaded_by=request.user)
                 print(f"[WEB DEBUG] File Saved. ID: {file_obj.id}")
                 
-                # 2. Dispatch Task (CPU Queue)
-                print(f"[WEB DEBUG] Sending task to CPU queue...")
+                # 2. Check/Deduct Credits (Optional - Safe Check)
+                account, _ = Account.objects.get_or_create(user=request.user)
+                if account.credits <= 0:
+                    print("[WEB WARN] User has 0 credits!")
+                    # You can uncomment this to block uploads:
+                    # return Response({"error": "Insufficient credits"}, status=402)
+
+                # 3. Dispatch Task
                 process_file_initialization.apply_async(
                     args=[file_obj.id], 
                     queue='cpu' 
                 )
-                
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             except Exception as e:
-                print(f"[WEB CRITICAL] Error: {str(e)}")
+                print(f"[WEB CRITICAL] Upload Error: {str(e)}")
                 return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 # ==============================================================================
-# 2. LIST VIEWS (Providing both names to prevent ImportErrors)
+# 2. LIST UPLOAD VIEW (History)
 # ==============================================================================
 class ListUploadView(generics.ListAPIView):
     serializer_class = FileListSerializer
@@ -59,12 +63,17 @@ class ListUploadView(generics.ListAPIView):
     def get_queryset(self):
         return FileUpload.objects.filter(uploaded_by=self.request.user).order_by('-uploaded_at')
 
-# Alias for backward compatibility if urls.py uses 'FileListView'
+# ==============================================================================
+# 3. FILE LIST VIEW (Alias for compatibility)
+# ==============================================================================
 class FileListView(ListUploadView):
+    """
+    Alias for ListUploadView in case the frontend calls this specific class name.
+    """
     pass
 
 # ==============================================================================
-# 3. FILE STATUS VIEW (Polling Endpoint)
+# 4. FILE STATUS VIEW (Polling)
 # ==============================================================================
 class FileStatusView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -84,15 +93,14 @@ class FileStatusView(views.APIView):
             return Response({"error": "File not found"}, status=status.HTTP_404_NOT_FOUND)
 
 # ==============================================================================
-# 4. DELETE VIEW
+# 5. LIST DELETE VIEW
 # ==============================================================================
 class ListDeleteView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
-    def delete(self, request, pk):
-        # Note: 'pk' is standard for generic views, 'file_id' for custom. 
-        # We try both to be safe.
-        id_to_delete = pk if pk else request.GET.get('id')
+    def delete(self, request, pk=None, file_id=None):
+        # Allow looking up by 'pk' (standard) or 'file_id' (legacy)
+        id_to_delete = pk if pk else file_id
         
         try:
             file_obj = FileUpload.objects.get(id=id_to_delete, uploaded_by=request.user)
@@ -102,24 +110,25 @@ class ListDeleteView(views.APIView):
             return Response({"error": "File not found"}, status=status.HTTP_404_NOT_FOUND)
 
 # ==============================================================================
-# 5. CREDIT BALANCE VIEW
+# 6. CREDIT BALANCE VIEW (Fixes 'Credits not showing')
 # ==============================================================================
 class CreditBalanceView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
         try:
-            # Attempt to find Account associated with user
-            account = Account.objects.filter(user=request.user).first()
-            credits = account.credits if account else 0
-            
-            return Response({"credits": credits}, status=status.HTTP_200_OK)
+            # get_or_create prevents crash if Account is missing
+            account, created = Account.objects.get_or_create(
+                user=request.user,
+                defaults={'credits': 0}
+            )
+            return Response({"credits": account.credits}, status=status.HTTP_200_OK)
         except Exception as e:
-            # Fallback if no Account model exists yet
+            logger.error(f"Credit Fetch Error: {e}")
             return Response({"credits": 0, "error": str(e)}, status=status.HTTP_200_OK)
 
 # ==============================================================================
-# 6. DOWNLOAD CSV VIEW
+# 7. DOWNLOAD VALID CSV VIEW
 # ==============================================================================
 class DownloadValidCsvView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]

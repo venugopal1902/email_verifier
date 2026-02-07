@@ -17,9 +17,13 @@ from django.urls import path
 from django.views.generic import RedirectView
 from accounts.views import LoginView, RegisterView
 from .views import (
-    FileUploadView, FileStatusView, FileListView, 
-    ListUploadView, ListDeleteView, CreditBalanceView,
-    DownloadValidCsvView # <--- Import this
+    FileUploadView, 
+    ListUploadView, 
+    FileListView,      # Alias
+    FileStatusView,
+    ListDeleteView,
+    CreditBalanceView,
+    DownloadValidCsvView
 )
 from .views_ui import login_view, register_view, dashboard_view, logout_view
 
