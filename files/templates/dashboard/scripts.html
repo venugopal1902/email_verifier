@@ -1,12 +1,13 @@
 <script>
     // ==========================================
-    // 1. CONFIG & UTILITIES
+    // 1. CONFIGURATION
     // ==========================================
     const API_CREDITS = '/api/v1/credits/';
     const API_BASE = '/api/v1/upload/';
-    const HISTORY_URL = '/api/v1/history/';
-    const LIST_UPLOAD_URL = '/api/v1/lists/'; 
+    const HISTORY_URL = '/api/v1/history/'; // Matches your urls.py
+    const LIST_UPLOAD_URL = '/api/v1/lists/upload/';
 
+    // --- CSRF Helper (Security for POST) ---
     function getCookie(name) {
         let cookieValue = null;
         if (document.cookie && document.cookie !== '') {
@@ -23,6 +24,255 @@
     }
     const csrftoken = getCookie('csrftoken');
 
+    // --- DOM Elements ---
+    const authContent = document.getElementById('authenticated-content');
+    const guestContent = document.getElementById('unauthenticated-message');
+    const logoutBtn = document.getElementById('logout-btn');
+    const loginLink = document.getElementById('login-link');
+    const userEmail = document.getElementById('user-email');
+    const refreshIndicator = document.getElementById('auto-refresh-indicator');
+
+    // ==========================================
+    // 2. AUTHENTICATION LOGIC (The Fix)
+    // ==========================================
+    
+    // We check if the user is logged in by asking the server "Do I have credits?"
+    // If the server says "OK" (200), the Browser Cookie is valid -> Show Dashboard.
+    // If the server says "Unauthorized" (401), the Cookie is invalid -> Show Login.
+
+    async function initApp() {
+        try {
+            const res = await fetch(API_CREDITS, {
+                method: 'GET',
+                headers: { 
+                    'Content-Type': 'application/json',
+                    // NO 'Authorization' header needed for Cookies
+                },
+                credentials: 'include' // <--- CRITICAL: Sends the Session Cookie
+            });
+
+            if (res.ok) {
+                // LOGGED IN
+                const data = await res.json();
+                showDashboard(data.credits);
+            } else {
+                // LOGGED OUT
+                showGuest();
+            }
+        } catch (e) {
+            console.error("Auth check failed:", e);
+            showGuest();
+        }
+    }
+
+    function showDashboard(credits) {
+        if(authContent) authContent.classList.remove('hidden');
+        if(guestContent) guestContent.classList.add('hidden');
+        if(logoutBtn) logoutBtn.classList.remove('hidden');
+        if(loginLink) loginLink.classList.add('hidden');
+        if(userEmail) userEmail.textContent = 'Welcome'; 
+
+        // Update Credits
+        const el = document.getElementById('credit-balance');
+        if(el) el.innerText = credits || 0;
+        const cont = document.getElementById('credit-container');
+        if(cont) cont.classList.remove('hidden');
+
+        // Start Data Loading
+        fetchData(); 
+        setInterval(fetchData, 2000); // Poll history every 2s
+        setInterval(refreshCredits, 10000); // Poll credits every 10s
+    }
+
+    function showGuest() {
+        if(authContent) authContent.classList.add('hidden');
+        if(guestContent) guestContent.classList.remove('hidden');
+        if(logoutBtn) logoutBtn.classList.add('hidden');
+        if(loginLink) loginLink.classList.remove('hidden');
+    }
+
+    function logout() {
+        // Redirect to Django's logout URL
+        window.location.href = '/logout/'; 
+    }
+
+    // ==========================================
+    // 3. DATA FETCHERS
+    // ==========================================
+
+    async function refreshCredits() {
+        try {
+            const res = await fetch(API_CREDITS, { 
+                headers: {'Content-Type': 'application/json'}, 
+                credentials: 'include' 
+            });
+            if (res.ok) {
+                const data = await res.json();
+                const el = document.getElementById('credit-balance');
+                if(el) el.innerText = data.credits;
+            }
+        } catch(e) {}
+    }
+
+    async function fetchData() {
+        try {
+            const res = await fetch(HISTORY_URL, { 
+                headers: {'Content-Type': 'application/json'}, 
+                credentials: 'include' 
+            });
+            if (res.ok) {
+                const data = await res.json();
+                // Handle various API response formats (List or Paged)
+                const files = data.results ? data.results : (Array.isArray(data) ? data : []);
+                updateTable(files);
+            }
+        } catch(e) {}
+    }
+
+    // ==========================================
+    // 4. UPLOAD LOGIC
+    // ==========================================
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('file-upload');
+
+    // Drag & Drop
+    if (dropzone) {
+        dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('border-blue-500', 'bg-blue-50', 'dark:bg-slate-700'); });
+        dropzone.addEventListener('dragleave', () => { dropzone.classList.remove('border-blue-500', 'bg-blue-50', 'dark:bg-slate-700'); });
+        dropzone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropzone.classList.remove('border-blue-500', 'bg-blue-50', 'dark:bg-slate-700');
+            if (e.dataTransfer.files.length) handleUpload(e.dataTransfer.files[0]);
+        });
+    }
+    if (fileInput) {
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) handleUpload(e.target.files[0]);
+        });
+    }
+
+    async function handleUpload(file) {
+        if (!file) return;
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const statusDiv = document.getElementById('upload-status');
+        if(statusDiv) statusDiv.innerHTML = `<p class="text-blue-500">Uploading ${file.name}...</p>`;
+
+        try {
+            const response = await fetch(API_BASE, {
+                method: 'POST',
+                headers: {
+                    'X-CSRFToken': csrftoken // Required for POST
+                },
+                body: formData,
+                credentials: 'include' // Required for Auth
+            });
+
+            if (response.ok) {
+                if(statusDiv) statusDiv.innerHTML = `<p class="text-green-500">Success! Processing...</p>`;
+                fetchData(); 
+                refreshCredits();
+            } else {
+                const err = await response.json();
+                if(statusDiv) statusDiv.innerHTML = `<p class="text-red-500">Error: ${err.error || 'Failed'}</p>`;
+            }
+        } catch (error) {
+            console.error(error);
+            if(statusDiv) statusDiv.innerHTML = `<p class="text-red-500">Network Error</p>`;
+        }
+    }
+
+    // Standard Form Handler (If you have a separate button)
+    const uploadForm = document.getElementById('uploadForm');
+    if (uploadForm) {
+        uploadForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const input = document.getElementById('fileInput');
+            if(input && input.files.length) handleUpload(input.files[0]);
+        });
+    }
+
+    // Suppression Form Handler
+    const suppForm = document.getElementById('suppressionForm');
+    if (suppForm) {
+        suppForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const fileEl = document.getElementById('suppressionFile');
+            if (!fileEl.files.length) return;
+
+            const formData = new FormData();
+            formData.append('file', fileEl.files[0]);
+            
+            const statusEl = document.getElementById('suppression-status');
+            if(statusEl) statusEl.innerHTML = 'Processing...';
+
+            try {
+                const listType = document.getElementById('listType').value;
+                const res = await fetch(`${LIST_UPLOAD_URL}${listType}/`, { 
+                    method: 'POST', 
+                    headers: { 'X-CSRFToken': csrftoken }, 
+                    body: formData,
+                    credentials: 'include'
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    if(statusEl) statusEl.innerHTML = `<span class="text-green-600">Success! Added.</span>`;
+                } else {
+                    if(statusEl) statusEl.innerHTML = `<span class="text-red-600">Error: ${data.detail || 'Failed'}</span>`;
+                }
+            } catch (err) {
+                if(statusEl) statusEl.innerHTML = 'Network Error';
+            }
+        });
+    }
+
+    // ==========================================
+    // 5. UI HELPERS
+    // ==========================================
+    function updateTable(files) {
+        const container = document.getElementById('status-area');
+        if (!container) return;
+
+        if (!files || files.length === 0) {
+            container.innerHTML = '<div class="p-12 text-center text-gray-400 text-sm">No verification history found.</div>';
+            return;
+        }
+
+        let hasActiveTasks = false;
+        
+        // Render Rows
+        const html = files.map(f => {
+            if (f.status === 'PROCESSING') hasActiveTasks = true;
+            
+            const processed = (f.valid_count||0) + (f.invalid_count||0);
+            const total = f.total_records || 1;
+            let percent = Math.round((processed/total)*100);
+            if (f.status === 'Completed') percent = 100;
+
+            let badge = `<span class="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs">Pending</span>`;
+            if (f.status === 'Processing') badge = `<span class="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs animate-pulse">Processing ${percent}%</span>`;
+            if (f.status === 'Completed') badge = `<span class="px-2 py-1 bg-green-100 text-green-700 rounded text-xs">Completed</span>`;
+            if (f.status === 'Failed') badge = `<span class="px-2 py-1 bg-red-100 text-red-700 rounded text-xs">Failed</span>`;
+
+            let download = '';
+            if (f.status === 'Completed') {
+                download = `<a href="/api/v1/download/${f.id}/" target="_blank" class="text-indigo-600 font-bold hover:underline text-xs">Download</a>`;
+            }
+
+            return `
+            <div class="grid grid-cols-12 gap-4 p-4 text-sm items-center border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 transition">
+                <div class="col-span-4 font-medium text-gray-900 dark:text-white truncate" title="${f.file}">${f.file.split('/').pop()}</div>
+                <div class="col-span-3 text-center">${badge}</div>
+                <div class="col-span-2 text-center text-gray-500">${processed} / ${total}</div>
+                <div class="col-span-3 text-right">${download}</div>
+            </div>`;
+        }).join('');
+
+        container.innerHTML = html;
+        if(refreshIndicator) refreshIndicator.classList.toggle('hidden', !hasActiveTasks);
+    }
+
     function toggleTheme() {
         const html = document.documentElement;
         const isDark = html.classList.toggle('dark');
@@ -35,132 +285,8 @@
     }
 
     // ==========================================
-    // 2. DATA FETCHING (Fixed Auth)
+    // 6. INITIALIZATION
     // ==========================================
-    async function fetchCredits() {
-        try {
-            const response = await fetch(API_CREDITS, {
-                method: 'GET',
-                headers: { 'Content-Type': 'application/json' },
-                credentials: 'include' // <--- USES COOKIE INSTEAD OF TOKEN
-            });
-            if (response.ok) {
-                const data = await response.json();
-                const el = document.getElementById('credit-balance');
-                if (el) el.innerText = data.credits;
-            }
-        } catch (error) {
-            console.error('Error fetching credits:', error);
-        }
-    }
+    document.addEventListener('DOMContentLoaded', initApp);
 
-    async function fetchData() {
-        // This function is called after upload to refresh history
-        // If your history table is server-side rendered, simple reload works best
-        setTimeout(() => location.reload(), 1000); 
-    }
-
-    // ==========================================
-    // 3. FILE UPLOAD LOGIC
-    // ==========================================
-    const dropzone = document.getElementById('dropzone');
-    const fileInput = document.getElementById('file-upload');
-
-    // Setup Drag & Drop
-    if (dropzone) {
-        dropzone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            dropzone.classList.add('border-blue-500', 'bg-blue-50', 'dark:bg-slate-700');
-        });
-        dropzone.addEventListener('dragleave', () => {
-            dropzone.classList.remove('border-blue-500', 'bg-blue-50', 'dark:bg-slate-700');
-        });
-        dropzone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropzone.classList.remove('border-blue-500', 'bg-blue-50', 'dark:bg-slate-700');
-            if (e.dataTransfer.files.length) handleUpload(e.dataTransfer.files[0]);
-        });
-    }
-    
-    if (fileInput) {
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length) handleUpload(e.target.files[0]);
-        });
-    }
-
-    async function handleUpload(file) {
-        const formData = new FormData();
-        formData.append('file', file);
-
-        const statusEl = document.getElementById('upload-status');
-        if (statusEl) statusEl.innerHTML = '<span class="text-blue-500">Uploading...</span>';
-
-        try {
-            const response = await fetch(API_BASE, {
-                method: 'POST',
-                headers: {
-                    'X-CSRFToken': csrftoken // <--- REQUIRED FOR DJANGO POST
-                },
-                body: formData,
-                credentials: 'include' // <--- USES COOKIE
-            });
-
-            if (response.ok) {
-                if (statusEl) statusEl.innerHTML = '<span class="text-green-600">Started!</span>';
-                fetchData(); // Reload page
-            } else {
-                const err = await response.json();
-                if (statusEl) statusEl.innerHTML = `<span class="text-red-600">Failed: ${err.detail || 'Error'}</span>`;
-            }
-        } catch (err) {
-            console.error(err);
-            if (statusEl) statusEl.innerHTML = '<span class="text-red-600">Network Error</span>';
-        }
-    }
-
-    // ==========================================
-    // 4. SUPPRESSION LIST LOGIC (Restored)
-    // ==========================================
-    const suppForm = document.getElementById('suppressionForm');
-    if (suppForm) {
-        suppForm.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const fileEl = document.getElementById('suppressionFile');
-            if (!fileEl.files.length) return;
-
-            const formData = new FormData();
-            formData.append('file', fileEl.files[0]);
-            
-            const statusEl = document.getElementById('suppression-status');
-            if (statusEl) statusEl.innerHTML = 'Processing...';
-
-            try {
-                const listType = document.getElementById('listType').value;
-                const res = await fetch(`${LIST_UPLOAD_URL}${listType}/`, { 
-                    method: 'POST', 
-                    headers: { 
-                        'X-CSRFToken': csrftoken 
-                    }, 
-                    body: formData,
-                    credentials: 'include' 
-                });
-                
-                const data = await res.json();
-                if (res.ok) {
-                    if (statusEl) statusEl.innerHTML = `<span class="text-green-600">Success! Added.</span>`;
-                } else {
-                    if (statusEl) statusEl.innerHTML = `<span class="text-red-600">Error: ${data.detail || 'Failed'}</span>`;
-                }
-            } catch (err) {
-                if (statusEl) statusEl.innerHTML = 'Network Error';
-            }
-        });
-    }
-
-    // ==========================================
-    // 5. INIT
-    // ==========================================
-    document.addEventListener('DOMContentLoaded', () => {
-        fetchCredits();
-    });
 </script>
