@@ -1,13 +1,29 @@
 <script>
     // ==========================================
-    // 1. CONFIGURATION
+    // 1. CONFIGURATION & STATE
     // ==========================================
     const API_CREDITS = '/api/v1/credits/';
     const API_BASE = '/api/v1/upload/';
-    const HISTORY_URL = '/api/v1/history/'; // Matches your urls.py
+    // Note: Ensure this matches your urls.py (it might be 'list/' or 'history/')
+    const HISTORY_URL = '/api/v1/history/'; 
     const LIST_UPLOAD_URL = '/api/v1/lists/upload/';
 
-    // --- CSRF Helper (Security for POST) ---
+    // DOM Elements
+    const authContent = document.getElementById('authenticated-content');
+    const guestContent = document.getElementById('unauthenticated-message');
+    const logoutBtn = document.getElementById('logout-btn');
+    const loginLink = document.getElementById('login-link');
+    const userEmail = document.getElementById('user-email');
+    const refreshIndicator = document.getElementById('auto-refresh-indicator');
+    
+    // Upload Elements
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('file-upload');
+    const uploadStatus = document.getElementById('upload-status');
+
+    // ==========================================
+    // 2. HELPERS (Cookies & Theme)
+    // ==========================================
     function getCookie(name) {
         let cookieValue = null;
         if (document.cookie && document.cookie !== '') {
@@ -24,39 +40,39 @@
     }
     const csrftoken = getCookie('csrftoken');
 
-    // --- DOM Elements ---
-    const authContent = document.getElementById('authenticated-content');
-    const guestContent = document.getElementById('unauthenticated-message');
-    const logoutBtn = document.getElementById('logout-btn');
-    const loginLink = document.getElementById('login-link');
-    const userEmail = document.getElementById('user-email');
-    const refreshIndicator = document.getElementById('auto-refresh-indicator');
+    function toggleTheme() {
+        const html = document.documentElement;
+        const isDark = html.classList.toggle('dark');
+        document.getElementById('theme-icon').textContent = isDark ? '☀️' : '🌙';
+        localStorage.setItem('theme', isDark ? 'dark' : 'light');
+    }
+    
+    // Apply Theme Immediately
+    if (localStorage.getItem('theme') === 'dark') {
+        document.documentElement.classList.add('dark');
+        document.getElementById('theme-icon').textContent = '☀️';
+    }
 
     // ==========================================
-    // 2. AUTHENTICATION LOGIC (The Fix)
+    // 3. AUTHENTICATION (THE FIX)
     // ==========================================
     
-    // We check if the user is logged in by asking the server "Do I have credits?"
-    // If the server says "OK" (200), the Browser Cookie is valid -> Show Dashboard.
-    // If the server says "Unauthorized" (401), the Cookie is invalid -> Show Login.
-
+    // Instead of checking localStorage (Token), we ask the server (Cookie).
     async function initApp() {
         try {
+            // We use 'fetchCredits' as a "Am I Logged In?" check
             const res = await fetch(API_CREDITS, {
                 method: 'GET',
-                headers: { 
-                    'Content-Type': 'application/json',
-                    // NO 'Authorization' header needed for Cookies
-                },
-                credentials: 'include' // <--- CRITICAL: Sends the Session Cookie
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include' // <--- CRITICAL: Sends Browser Cookie
             });
 
             if (res.ok) {
-                // LOGGED IN
+                // HTTP 200: Cookie is valid -> Show Dashboard
                 const data = await res.json();
                 showDashboard(data.credits);
             } else {
-                // LOGGED OUT
+                // HTTP 401/403: Cookie invalid -> Show Guest
                 showGuest();
             }
         } catch (e) {
@@ -70,16 +86,16 @@
         if(guestContent) guestContent.classList.add('hidden');
         if(logoutBtn) logoutBtn.classList.remove('hidden');
         if(loginLink) loginLink.classList.add('hidden');
-        if(userEmail) userEmail.textContent = 'Welcome'; 
+        if(userEmail) userEmail.textContent = 'Welcome'; // Or set from API data
 
-        // Update Credits
+        // Update Credits UI
         const el = document.getElementById('credit-balance');
         if(el) el.innerText = credits || 0;
         const cont = document.getElementById('credit-container');
         if(cont) cont.classList.remove('hidden');
 
-        // Start Data Loading
-        fetchData(); 
+        // Start Auto-Refreshers
+        fetchData(); // Load history
         setInterval(fetchData, 2000); // Poll history every 2s
         setInterval(refreshCredits, 10000); // Poll credits every 10s
     }
@@ -92,12 +108,12 @@
     }
 
     function logout() {
-        // Redirect to Django's logout URL
+        // Redirect to Django Logout View
         window.location.href = '/logout/'; 
     }
 
     // ==========================================
-    // 3. DATA FETCHERS
+    // 4. API ACTIONS
     // ==========================================
 
     async function refreshCredits() {
@@ -118,37 +134,15 @@
         try {
             const res = await fetch(HISTORY_URL, { 
                 headers: {'Content-Type': 'application/json'}, 
-                credentials: 'include' 
+                credentials: 'include' // Auth via Cookie
             });
             if (res.ok) {
                 const data = await res.json();
-                // Handle various API response formats (List or Paged)
+                // Handle different DRF response formats (List vs Pagination)
                 const files = data.results ? data.results : (Array.isArray(data) ? data : []);
                 updateTable(files);
             }
         } catch(e) {}
-    }
-
-    // ==========================================
-    // 4. UPLOAD LOGIC
-    // ==========================================
-    const dropzone = document.getElementById('dropzone');
-    const fileInput = document.getElementById('file-upload');
-
-    // Drag & Drop
-    if (dropzone) {
-        dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('border-blue-500', 'bg-blue-50', 'dark:bg-slate-700'); });
-        dropzone.addEventListener('dragleave', () => { dropzone.classList.remove('border-blue-500', 'bg-blue-50', 'dark:bg-slate-700'); });
-        dropzone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropzone.classList.remove('border-blue-500', 'bg-blue-50', 'dark:bg-slate-700');
-            if (e.dataTransfer.files.length) handleUpload(e.dataTransfer.files[0]);
-        });
-    }
-    if (fileInput) {
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length) handleUpload(e.target.files[0]);
-        });
     }
 
     async function handleUpload(file) {
@@ -156,8 +150,7 @@
         const formData = new FormData();
         formData.append('file', file);
 
-        const statusDiv = document.getElementById('upload-status');
-        if(statusDiv) statusDiv.innerHTML = `<p class="text-blue-500">Uploading ${file.name}...</p>`;
+        if(uploadStatus) uploadStatus.innerHTML = `<p class="text-blue-500 animate-pulse">Uploading ${file.name}...</p>`;
 
         try {
             const response = await fetch(API_BASE, {
@@ -170,36 +163,64 @@
             });
 
             if (response.ok) {
-                if(statusDiv) statusDiv.innerHTML = `<p class="text-green-500">Success! Processing...</p>`;
-                fetchData(); 
-                refreshCredits();
+                if(uploadStatus) uploadStatus.innerHTML = `<p class="text-green-500">Success! Processing...</p>`;
+                fetchData(); // Immediate table refresh
+                refreshCredits(); // Update cost
+                
+                // Clear status after 3s
+                setTimeout(() => { if(uploadStatus) uploadStatus.innerHTML = ''; }, 3000);
             } else {
                 const err = await response.json();
-                if(statusDiv) statusDiv.innerHTML = `<p class="text-red-500">Error: ${err.error || 'Failed'}</p>`;
+                if(uploadStatus) uploadStatus.innerHTML = `<p class="text-red-500">Error: ${err.error || 'Failed'}</p>`;
             }
         } catch (error) {
             console.error(error);
-            if(statusDiv) statusDiv.innerHTML = `<p class="text-red-500">Network Error</p>`;
+            if(uploadStatus) uploadStatus.innerHTML = `<p class="text-red-500">Network Error</p>`;
         }
     }
 
-    // Standard Form Handler (If you have a separate button)
+    // ==========================================
+    // 5. EVENT LISTENERS (Uploads & Forms)
+    // ==========================================
+
+    // Drag & Drop
+    if (dropzone) {
+        dropzone.addEventListener('dragover', (e) => { 
+            e.preventDefault(); 
+            dropzone.classList.add('border-blue-500', 'bg-blue-50', 'dark:bg-slate-700'); 
+        });
+        dropzone.addEventListener('dragleave', () => { 
+            dropzone.classList.remove('border-blue-500', 'bg-blue-50', 'dark:bg-slate-700'); 
+        });
+        dropzone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropzone.classList.remove('border-blue-500', 'bg-blue-50', 'dark:bg-slate-700');
+            if (e.dataTransfer.files.length) handleUpload(e.dataTransfer.files[0]);
+        });
+    }
+    if (fileInput) {
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) handleUpload(e.target.files[0]);
+        });
+    }
+
+    // Standard Form Upload (if you use the button instead of drag/drop)
     const uploadForm = document.getElementById('uploadForm');
     if (uploadForm) {
         uploadForm.addEventListener('submit', async (e) => {
             e.preventDefault();
-            const input = document.getElementById('fileInput');
+            const input = document.getElementById('fileInput'); // Ensure ID matches your HTML
             if(input && input.files.length) handleUpload(input.files[0]);
         });
     }
 
-    // Suppression Form Handler
+    // Suppression List Upload
     const suppForm = document.getElementById('suppressionForm');
     if (suppForm) {
         suppForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             const fileEl = document.getElementById('suppressionFile');
-            if (!fileEl.files.length) return;
+            if (!fileEl || !fileEl.files.length) return;
 
             const formData = new FormData();
             formData.append('file', fileEl.files[0]);
@@ -209,15 +230,18 @@
 
             try {
                 const listType = document.getElementById('listType').value;
-                const res = await fetch(`${LIST_UPLOAD_URL}${listType}/`, { 
+                const targetUrl = `${LIST_UPLOAD_URL}${listType}/`;
+
+                const res = await fetch(targetUrl, { 
                     method: 'POST', 
                     headers: { 'X-CSRFToken': csrftoken }, 
                     body: formData,
                     credentials: 'include'
                 });
+                
                 const data = await res.json();
                 if (res.ok) {
-                    if(statusEl) statusEl.innerHTML = `<span class="text-green-600">Success! Added.</span>`;
+                    if(statusEl) statusEl.innerHTML = `<span class="text-green-600">Success! ${data.processed_rows || 'Rows'} added.</span>`;
                 } else {
                     if(statusEl) statusEl.innerHTML = `<span class="text-red-600">Error: ${data.detail || 'Failed'}</span>`;
                 }
@@ -228,7 +252,7 @@
     }
 
     // ==========================================
-    // 5. UI HELPERS
+    // 6. UI RENDERER (Table Logic)
     // ==========================================
     function updateTable(files) {
         const container = document.getElementById('status-area');
@@ -241,31 +265,42 @@
 
         let hasActiveTasks = false;
         
-        // Render Rows
         const html = files.map(f => {
-            if (f.status === 'PROCESSING') hasActiveTasks = true;
+            if (f.status === 'PROCESSING' || f.status === 'Processing') hasActiveTasks = true;
             
             const processed = (f.valid_count||0) + (f.invalid_count||0);
             const total = f.total_records || 1;
-            let percent = Math.round((processed/total)*100);
+            let percent = total > 0 ? Math.round((processed/total)*100) : 0;
             if (f.status === 'Completed') percent = 100;
 
+            // Status Badge
             let badge = `<span class="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs">Pending</span>`;
-            if (f.status === 'Processing') badge = `<span class="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs animate-pulse">Processing ${percent}%</span>`;
-            if (f.status === 'Completed') badge = `<span class="px-2 py-1 bg-green-100 text-green-700 rounded text-xs">Completed</span>`;
-            if (f.status === 'Failed') badge = `<span class="px-2 py-1 bg-red-100 text-red-700 rounded text-xs">Failed</span>`;
-
-            let download = '';
-            if (f.status === 'Completed') {
-                download = `<a href="/api/v1/download/${f.id}/" target="_blank" class="text-indigo-600 font-bold hover:underline text-xs">Download</a>`;
+            if (f.status === 'Processing' || f.status === 'PROCESSING') {
+                badge = `<span class="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs animate-pulse">Processing ${percent}%</span>`;
+            } else if (f.status === 'Completed' || f.status === 'COMPLETED') {
+                badge = `<span class="px-2 py-1 bg-green-100 text-green-700 rounded text-xs">Completed</span>`;
+            } else if (f.status === 'Failed' || f.status === 'FAILED') {
+                badge = `<span class="px-2 py-1 bg-red-100 text-red-700 rounded text-xs">Failed</span>`;
             }
 
+            // Download Link
+            let downloadLink = '-';
+            if (f.status === 'Completed' || f.status === 'COMPLETED') {
+                downloadLink = `<a href="/api/v1/download/${f.id}/" target="_blank" class="text-indigo-600 font-bold hover:underline text-xs flex items-center justify-end gap-1">Download <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg></a>`;
+            }
+
+            // Filename truncation
+            const fileName = f.file ? f.file.split('/').pop() : (f.file_name || 'Unknown File');
+
             return `
-            <div class="grid grid-cols-12 gap-4 p-4 text-sm items-center border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 transition">
-                <div class="col-span-4 font-medium text-gray-900 dark:text-white truncate" title="${f.file}">${f.file.split('/').pop()}</div>
+            <div id="row-${f.id}" class="grid grid-cols-12 gap-4 p-4 text-sm items-center border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800 transition">
+                <div class="col-span-4 font-medium text-gray-900 dark:text-white truncate" title="${fileName}">
+                    ${fileName}
+                    <div class="text-[10px] text-gray-400 font-normal mt-0.5">${new Date(f.uploaded_at).toLocaleString()}</div>
+                </div>
                 <div class="col-span-3 text-center">${badge}</div>
-                <div class="col-span-2 text-center text-gray-500">${processed} / ${total}</div>
-                <div class="col-span-3 text-right">${download}</div>
+                <div class="col-span-2 text-center text-gray-500 dark:text-gray-400 font-mono">${processed} / ${total}</div>
+                <div class="col-span-3 text-right">${downloadLink}</div>
             </div>`;
         }).join('');
 
@@ -273,19 +308,8 @@
         if(refreshIndicator) refreshIndicator.classList.toggle('hidden', !hasActiveTasks);
     }
 
-    function toggleTheme() {
-        const html = document.documentElement;
-        const isDark = html.classList.toggle('dark');
-        document.getElementById('theme-icon').textContent = isDark ? '☀️' : '🌙';
-        localStorage.setItem('theme', isDark ? 'dark' : 'light');
-    }
-    if (localStorage.getItem('theme') === 'dark') {
-        document.documentElement.classList.add('dark');
-        document.getElementById('theme-icon').textContent = '☀️';
-    }
-
     // ==========================================
-    // 6. INITIALIZATION
+    // 7. INITIALIZATION
     // ==========================================
     document.addEventListener('DOMContentLoaded', initApp);
 

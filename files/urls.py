@@ -15,36 +15,65 @@
 # ]
 from django.urls import path
 from django.views.generic import RedirectView
+
+# 1. UI Views (Login Page, Dashboard Page)
+from .views_ui import (
+    login_view, 
+    register_view, 
+    dashboard_view, 
+    logout_view
+)
+
+# 2. API Views (Auth - Login/Register Logic)
 from accounts.views import LoginView, RegisterView
+
+# 3. API Views (Files, Credits, Downloads)
 from .views import (
     FileUploadView, 
-    ListUploadView, 
-    FileListView,      # Alias
-    FileStatusView,
-    ListDeleteView,
-    CreditBalanceView,
-    DownloadValidCsvView
+    FileHistoryView, 
+    FileStatusView, 
+    FileDeleteView, 
+    CreditBalanceView, 
+    DownloadValidCsvView,
+    SuppressionUploadView, 
+    SuppressionDeleteView
 )
-from .views_ui import login_view, register_view, dashboard_view, logout_view
 
 urlpatterns = [
+    # ==========================================
+    # 1. UI ROUTES (Browser Pages)
+    # ==========================================
     path('', RedirectView.as_view(url='/login/', permanent=False), name='root'),
     path('login/', login_view, name='login'),
     path('register/', register_view, name='register'),
     path('dashboard/', dashboard_view, name='dashboard'),
     path('logout/', logout_view, name='logout'),
 
+    # ==========================================
+    # 2. API AUTH ROUTES (Fixes 404 Network Error)
+    # ==========================================
     path('api/v2/auth/login/', LoginView.as_view(), name='auth-login'),
     path('api/v2/auth/register/', RegisterView.as_view(), name='auth-register'),
 
+    # ==========================================
+    # 3. API FILE ROUTES (v1)
+    # ==========================================
+    # Upload & History
     path('api/v1/upload/', FileUploadView.as_view(), name='file-upload'),
-    path('api/v1/status/<str:file_id>/', FileStatusView.as_view(), name='file-status'),
-    path('api/v1/history/', FileListView.as_view(), name='file-history'),
-    path('api/v1/credits/', CreditBalanceView.as_view(), name='get-credits'),
+    path('api/v1/history/', FileHistoryView.as_view(), name='file-history'),
+    
+    # Status & Operations
+    path('api/v1/status/<int:file_id>/', FileStatusView.as_view(), name='file-status'),
+    path('api/v1/delete/<int:pk>/', FileDeleteView.as_view(), name='file-delete'),
+    
+    # Credits
+    path('api/v1/credits/', CreditBalanceView.as_view(), name='credits'),
+    
+    # Download
+    path('api/v1/download/<int:file_id>/', DownloadValidCsvView.as_view(), name='file-download'),
+    path('api/v1/download/<int:file_id>/valid/', DownloadValidCsvView.as_view(), name='file-download-valid'),
 
-    path('api/v1/lists/upload/<str:list_type>/', ListUploadView.as_view(), name='list-upload'),
-    path('api/v1/lists/<str:list_type>/<str:email>/', ListDeleteView.as_view(), name='list-delete'),
-
-    # --- DOWNLOAD URL ---
-    path('api/v1/download/<str:file_id>/valid/', DownloadValidCsvView.as_view(), name='download-valid'),
+    # Suppression Lists
+    path('api/v1/lists/upload/<str:list_type>/', SuppressionUploadView.as_view(), name='list-upload'),
+    path('api/v1/lists/<str:list_type>/<str:email>/', SuppressionDeleteView.as_view(), name='list-delete'),
 ]

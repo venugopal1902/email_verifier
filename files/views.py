@@ -1,150 +1,141 @@
 import logging
 import csv
-from django.http import HttpResponse, StreamingHttpResponse
+import pandas as pd
+from django.http import HttpResponse
 from rest_framework import views, status, generics, permissions
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.shortcuts import get_object_or_404
-from django.db.models import F
 
-# Models & Serializers
-from files.models import FileUpload, VerificationResult
+# Models
+from files.models import FileUpload, VerificationResult, BouncedEmail, UnsubscribedEmail
 from accounts.models import Account  
 from .serializers import FileListSerializer
-
-# Tasks
 from files.tasks import process_file_initialization
 
 logger = logging.getLogger(__name__)
 
-# ==============================================================================
-# 1. FILE UPLOAD VIEW
-# ==============================================================================
+# ==========================================
+# 1. FILE UPLOAD & PROCESSING
+# ==========================================
 class FileUploadView(views.APIView):
     parser_classes = [MultiPartParser, FormParser]
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, format=None):
-        print(f"\n[WEB DEBUG] >>> Upload Received from: {request.user}")
-        
         serializer = FileListSerializer(data=request.data)
         if serializer.is_valid():
             try:
-                # 1. Save File
+                # Save File
                 file_obj = serializer.save(uploaded_by=request.user)
-                print(f"[WEB DEBUG] File Saved. ID: {file_obj.id}")
+                # Ensure Account Exists
+                Account.objects.get_or_create(user=request.user, defaults={'credits': 0})
+                # Trigger Task
+                process_file_initialization.apply_async(args=[file_obj.id], queue='cpu')
                 
-                # 2. Check/Deduct Credits (Optional - Safe Check)
-                account, _ = Account.objects.get_or_create(user=request.user)
-                if account.credits <= 0:
-                    print("[WEB WARN] User has 0 credits!")
-                    # You can uncomment this to block uploads:
-                    # return Response({"error": "Insufficient credits"}, status=402)
-
-                # 3. Dispatch Task
-                process_file_initialization.apply_async(
-                    args=[file_obj.id], 
-                    queue='cpu' 
-                )
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             except Exception as e:
-                print(f"[WEB CRITICAL] Upload Error: {str(e)}")
-                return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"error": str(e)}, status=500)
+        return Response(serializer.errors, status=400)
 
-# ==============================================================================
-# 2. LIST UPLOAD VIEW (History)
-# ==============================================================================
-class ListUploadView(generics.ListAPIView):
+# ==========================================
+# 2. DASHBOARD HISTORY
+# ==========================================
+class FileHistoryView(generics.ListAPIView):
     serializer_class = FileListSerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         return FileUpload.objects.filter(uploaded_by=self.request.user).order_by('-uploaded_at')
 
-# ==============================================================================
-# 3. FILE LIST VIEW (Alias for compatibility)
-# ==============================================================================
-class FileListView(ListUploadView):
-    """
-    Alias for ListUploadView in case the frontend calls this specific class name.
-    """
-    pass
+# ==========================================
+# 3. SUPPRESSION LISTS (Bounced/Unsub)
+# ==========================================
+class SuppressionUploadView(views.APIView):
+    parser_classes = [MultiPartParser, FormParser]
+    permission_classes = [permissions.IsAuthenticated]
 
-# ==============================================================================
-# 4. FILE STATUS VIEW (Polling)
-# ==============================================================================
+    def post(self, request, list_type):
+        file_obj = request.FILES.get('file')
+        if not file_obj:
+            return Response({"error": "No file provided"}, status=400)
+
+        try:
+            # Determine Model
+            model = BouncedEmail if list_type == 'bounced' else UnsubscribedEmail
+            
+            # Read CSV
+            df = pd.read_csv(file_obj)
+            # Find email column (simple search)
+            col = next((c for c in df.columns if 'mail' in c.lower()), df.columns[0])
+            emails = df[col].dropna().astype(str).unique().tolist()
+
+            # Bulk Create (Ignore duplicates)
+            objs = [
+                model(email=email, uploaded_by_user_id=str(request.user.id)) 
+                for email in emails
+            ]
+            model.objects.bulk_create(objs, ignore_conflicts=True)
+
+            return Response({"status": "success", "processed_rows": len(emails)}, status=201)
+        except Exception as e:
+            logger.error(f"Suppression Upload Error: {e}")
+            return Response({"error": str(e)}, status=500)
+
+class SuppressionDeleteView(views.APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request, list_type, email):
+        model = BouncedEmail if list_type == 'bounced' else UnsubscribedEmail
+        model.objects.filter(email=email).delete()
+        return Response({"status": "deleted"}, status=200)
+
+# ==========================================
+# 4. UTILITIES (Status, Credits, Delete)
+# ==========================================
 class FileStatusView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
-
     def get(self, request, file_id):
-        try:
-            file_obj = FileUpload.objects.get(id=file_id, uploaded_by=request.user)
-            return Response({
-                "id": file_obj.id,
-                "status": file_obj.status,
-                "processed": file_obj.processed_records,
-                "total": file_obj.total_records,
-                "valid": file_obj.valid_count,
-                "invalid": file_obj.invalid_count
-            }, status=status.HTTP_200_OK)
-        except FileUpload.DoesNotExist:
-            return Response({"error": "File not found"}, status=status.HTTP_404_NOT_FOUND)
+        file_obj = get_object_or_404(FileUpload, id=file_id, uploaded_by=request.user)
+        return Response({
+            "id": file_obj.id,
+            "status": file_obj.status,
+            "processed": file_obj.processed_records,
+            "total": file_obj.total_records,
+            "valid": file_obj.valid_count,
+            "invalid": file_obj.invalid_count
+        })
 
-# ==============================================================================
-# 5. LIST DELETE VIEW
-# ==============================================================================
-class ListDeleteView(views.APIView):
-    permission_classes = [permissions.IsAuthenticated]
-
-    def delete(self, request, pk=None, file_id=None):
-        # Allow looking up by 'pk' (standard) or 'file_id' (legacy)
-        id_to_delete = pk if pk else file_id
-        
-        try:
-            file_obj = FileUpload.objects.get(id=id_to_delete, uploaded_by=request.user)
-            file_obj.delete() 
-            return Response({"status": "deleted"}, status=status.HTTP_200_OK)
-        except FileUpload.DoesNotExist:
-            return Response({"error": "File not found"}, status=status.HTTP_404_NOT_FOUND)
-
-# ==============================================================================
-# 6. CREDIT BALANCE VIEW (Fixes 'Credits not showing')
-# ==============================================================================
 class CreditBalanceView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
-
     def get(self, request):
-        try:
-            # get_or_create prevents crash if Account is missing
-            account, created = Account.objects.get_or_create(
-                user=request.user,
-                defaults={'credits': 0}
-            )
-            return Response({"credits": account.credits}, status=status.HTTP_200_OK)
-        except Exception as e:
-            logger.error(f"Credit Fetch Error: {e}")
-            return Response({"credits": 0, "error": str(e)}, status=status.HTTP_200_OK)
+        acct, _ = Account.objects.get_or_create(user=request.user, defaults={'credits': 0})
+        return Response({"credits": acct.credits})
 
-# ==============================================================================
-# 7. DOWNLOAD VALID CSV VIEW
-# ==============================================================================
+class FileDeleteView(views.APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    def delete(self, request, pk=None):
+        file_obj = get_object_or_404(FileUpload, id=pk, uploaded_by=request.user)
+        file_obj.delete()
+        return Response({"status": "deleted"})
+
+# ==========================================
+# 5. DOWNLOAD
+# ==========================================
 class DownloadValidCsvView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
     
     def get(self, request, file_id):
         file_obj = get_object_or_404(FileUpload, id=file_id, uploaded_by=request.user)
-
+        
         response = HttpResponse(content_type='text/csv')
         response['Content-Disposition'] = f'attachment; filename="verified_{file_id}.csv"'
-
+        
         writer = csv.writer(response)
         writer.writerow(['Email Address', 'Status']) 
-
-        results = VerificationResult.objects.filter(file=file_obj).iterator()
         
+        results = VerificationResult.objects.filter(file=file_obj).iterator()
         for res in results:
             writer.writerow([res.email, res.final_status])
-
+            
         return response
