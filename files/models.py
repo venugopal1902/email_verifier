@@ -1,3 +1,4 @@
+import uuid
 from django.db import models
 from django.utils import timezone
 
@@ -36,18 +37,29 @@ class FileUpload(models.Model):
         ('FAILED', 'Failed')
     ]
 
-    file_id = models.CharField(max_length=100, primary_key=True)
+    # FIX 1: Add default=uuid.uuid4 to prevent "duplicate key" errors
+    file_id = models.CharField(max_length=100, primary_key=True, default=uuid.uuid4, editable=False)
+    
     file_name = models.CharField(max_length=255)
     file_path = models.FileField(upload_to='uploads/%Y/%m/%d/') 
     uploaded_by_user_id = models.CharField(max_length=50) 
     
+    # --- Statistics Fields (Synced with tasks.py) ---
+    total_records = models.IntegerField(default=0)      # Used by tasks.py
+    processed_records = models.IntegerField(default=0)  # Used by tasks.py (Progress Bar)
+    valid_count = models.IntegerField(default=0)        # Used by tasks.py
+    invalid_record_count = models.IntegerField(default=0)
+    
+    # Legacy/Extra fields (kept to prevent data loss)
     original_record_count = models.IntegerField(default=0)
-    unique_record_count = models.IntegerField(default=0)   # Valid Count
-    invalid_record_count = models.IntegerField(default=0)  # <--- NEW FIELD
+    unique_record_count = models.IntegerField(default=0) 
     filtered_unsub_count = models.IntegerField(default=0)
     filtered_bounce_count = models.IntegerField(default=0)
     
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='UPLOADED')
+    
+    # Timestamps
+    uploaded_at = models.DateTimeField(auto_now_add=True) # Used for sorting history
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     

@@ -19,3 +19,20 @@ docker-compose exec web python manage.py createsuperuser
 
 # 6. Open in Browser
 Write-Host "App is running at: http://127.0.0.1:8000/files/dashboard/" -ForegroundColor Green
+
+
+
+# 1. Enter the Django Shell
+docker-compose exec web python manage.py shell
+
+# 2. Paste this Python code to delete stuck files:
+from files.models import FileUpload
+deleted_count, _ = FileUpload.objects.filter(status='Processing').delete()
+print(f"Deleted {deleted_count} stuck files.")
+
+# 3. Exit the shell
+exit()
+
+docker-compose exec redis redis-cli FLUSHALL
+
+docker-compose exec redis redis-cli FLUSHALL

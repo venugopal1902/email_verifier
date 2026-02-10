@@ -16,7 +16,7 @@
 from django.urls import path
 from django.views.generic import RedirectView
 
-# 1. UI Views (Login Page, Dashboard Page)
+# 1. UI Views
 from .views_ui import (
     login_view, 
     register_view, 
@@ -24,10 +24,10 @@ from .views_ui import (
     logout_view
 )
 
-# 2. API Views (Auth - Login/Register Logic)
+# 2. API Views (Auth)
 from accounts.views import LoginView, RegisterView
 
-# 3. API Views (Files, Credits, Downloads)
+# 3. API Views (Files)
 from .views import (
     FileUploadView, 
     FileHistoryView, 
@@ -41,7 +41,7 @@ from .views import (
 
 urlpatterns = [
     # ==========================================
-    # 1. UI ROUTES (Browser Pages)
+    # 1. UI ROUTES
     # ==========================================
     path('', RedirectView.as_view(url='/login/', permanent=False), name='root'),
     path('login/', login_view, name='login'),
@@ -50,7 +50,7 @@ urlpatterns = [
     path('logout/', logout_view, name='logout'),
 
     # ==========================================
-    # 2. API AUTH ROUTES (Fixes 404 Network Error)
+    # 2. API AUTH ROUTES
     # ==========================================
     path('api/v2/auth/login/', LoginView.as_view(), name='auth-login'),
     path('api/v2/auth/register/', RegisterView.as_view(), name='auth-register'),
@@ -58,22 +58,19 @@ urlpatterns = [
     # ==========================================
     # 3. API FILE ROUTES (v1)
     # ==========================================
-    # Upload & History
     path('api/v1/upload/', FileUploadView.as_view(), name='file-upload'),
     path('api/v1/history/', FileHistoryView.as_view(), name='file-history'),
     
-    # Status & Operations
-    path('api/v1/status/<int:file_id>/', FileStatusView.as_view(), name='file-status'),
-    path('api/v1/delete/<int:pk>/', FileDeleteView.as_view(), name='file-delete'),
+    # FIX: Change <int:...> to <str:...> for UUIDs
+    path('api/v1/status/<str:file_id>/', FileStatusView.as_view(), name='file-status'),
+    path('api/v1/delete/<str:pk>/', FileDeleteView.as_view(), name='file-delete'),
     
-    # Credits
     path('api/v1/credits/', CreditBalanceView.as_view(), name='credits'),
     
-    # Download
-    path('api/v1/download/<int:file_id>/', DownloadValidCsvView.as_view(), name='file-download'),
-    path('api/v1/download/<int:file_id>/valid/', DownloadValidCsvView.as_view(), name='file-download-valid'),
+    # FIX: Change <int:file_id> to <str:file_id>
+    path('api/v1/download/<str:file_id>/', DownloadValidCsvView.as_view(), name='file-download'),
+    path('api/v1/download/<str:file_id>/valid/', DownloadValidCsvView.as_view(), name='file-download-valid'),
 
-    # Suppression Lists
     path('api/v1/lists/upload/<str:list_type>/', SuppressionUploadView.as_view(), name='list-upload'),
     path('api/v1/lists/<str:list_type>/<str:email>/', SuppressionDeleteView.as_view(), name='list-delete'),
 ]

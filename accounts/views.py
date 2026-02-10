@@ -3,8 +3,7 @@ import time
 from rest_framework import views, status
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
-# 1. ADD 'login' HERE
-from django.contrib.auth import authenticate, login, get_user_model 
+from django.contrib.auth import authenticate, login, get_user_model
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from django.db import transaction
@@ -25,26 +24,15 @@ class LoginView(views.APIView):
         
         email = serializer.validated_data['email']
         password = serializer.validated_data['password']
-        
         user = authenticate(request, username=email, password=password)
 
         if user:
             if not user.is_active:
                 return Response({"error": "Account disabled"}, status=403)
-            
-            # ====================================================
-            # 2. THE MISSING PIECE (CRITICAL)
-            # This sets the Browser Cookie so the Dashboard works.
-            # ====================================================
-            login(request, user) 
-
+            login(request, user)
             return Response({
                 "message": "Login Successful",
-                "user": {
-                    "email": user.email,
-                    "role": getattr(user, 'role', 'USER'),
-                    "account_id": getattr(user.account, 'account_id', None) if hasattr(user, 'account') else None
-                }
+                "user": {"email": user.email}
             }, status=200)
         
         return Response({"error": "Invalid email or password"}, status=401)
@@ -70,7 +58,8 @@ class RegisterView(views.APIView):
                     account_id=f"acct_{unique_suffix}",
                     account_name=org_name,
                     database_name=f"db_{unique_suffix}", 
-                    credits_available=1000000
+                    # --- FIX: Default 1 Lakh Credits ---
+                    credits_available=100000.00
                 )
 
                 user = User.objects.create_user(
@@ -79,9 +68,7 @@ class RegisterView(views.APIView):
                     role='ADMIN', 
                     account=new_account
                 )
-                
-                # Optional: Log them in immediately after register
-                login(request, user) 
+                login(request, user)
 
             return Response({
                 "message": "User registered successfully.",
