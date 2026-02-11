@@ -12,6 +12,10 @@ from files.models import FileUpload, VerificationResult, BouncedEmail, Unsubscri
 from accounts.models import Account  
 from .serializers import FileListSerializer
 from files.tasks import process_file_initialization
+import redis
+from django.conf import settings
+from core.redis_utils import add_to_list
+
 
 logger = logging.getLogger(__name__)
 
@@ -71,14 +75,35 @@ class SuppressionUploadView(views.APIView):
         file_obj = request.FILES.get('file')
         if not file_obj: return Response({"error": "No file"}, status=400)
         try:
-            model = BouncedEmail if list_type == 'bounced' else UnsubscribedEmail
+
+            if list_type == 'bounced':
+                model = BouncedEmail
+                redis_list_type = 'BOUNCE'
+            else:
+                model = UnsubscribedEmail
+                redis_list_type = 'UNSUB'
+            # 2. Read CSV
             df = pd.read_csv(file_obj)
             col = next((c for c in df.columns if 'mail' in c.lower()), df.columns[0])
-            emails = df[col].dropna().astype(str).unique().tolist()
+            emails = df[col].dropna().astype(str).str.lower().str.strip().unique().tolist()
             
-            objs = [model(email=e, uploaded_by_user_id=str(request.user.id)) for e in emails]
+            user_id_str = str(request.user.id)
+
+            # 3. Save to Postgres DB
+            objs = [model(email=e, uploaded_by_user_id=user_id_str) for e in emails]
             model.objects.bulk_create(objs, ignore_conflicts=True)
-            return Response({"status": "success", "processed_rows": len(emails)}, status=201)
+
+            # 4. Save to Redis Shards
+            # We must loop because your `Notes` hashes ONE email at a time
+            for email in emails:
+                add_to_list(email=email, list_type=redis_list_type, user_id=user_id_str)
+
+            return Response({
+                "status": "success", 
+                "processed_rows": len(emails),
+                "redis_updated": True
+            }, status=201)
+            # return Response({"status": "success", "processed_rows": len(emails)}, status=201)
         except Exception as e:
             return Response({"error": str(e)}, status=500)
 
@@ -139,3 +164,45 @@ class DownloadValidCsvView(views.APIView):
         results = VerificationResult.objects.filter(file=file_obj).iterator()
         for res in results: writer.writerow([res.email, res.final_status])
         return response
+class SuppressionUploadView(views.APIView):
+    parser_classes = [MultiPartParser, FormParser]
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, list_type):
+        file_obj = request.FILES.get('file')
+        if not file_obj: return Response({"error": "No file"}, status=400)
+        
+        try:
+            # 1. Determine Model & Redis Key
+            if list_type == 'bounced':
+                model = BouncedEmail
+                redis_key = 'bounced_emails' # Make sure this matches redis_utils
+            else:
+                model = UnsubscribedEmail
+                redis_key = 'unsub_emails'
+
+            # 2. Read CSV
+            df = pd.read_csv(file_obj)
+            col = next((c for c in df.columns if 'mail' in c.lower()), df.columns[0])
+            emails = df[col].dropna().astype(str).str.lower().str.strip().unique().tolist()
+            
+            # 3. Save to Postgres (Bulk Create)
+            objs = [
+                model(email=e, uploaded_by_user_id=str(request.user.id)) 
+                for e in emails
+            ]
+            model.objects.bulk_create(objs, ignore_conflicts=True)
+
+            # 4. Save to Redis (Pipeline for speed) [NEW STEP]
+            r = redis.Redis.from_url(settings.CELERY_BROKER_URL)
+            if emails:
+                r.sadd(redis_key, *emails)
+
+            return Response({
+                "status": "success", 
+                "processed_rows": len(emails),
+                "redis_updated": True
+            }, status=201)
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=500)    
