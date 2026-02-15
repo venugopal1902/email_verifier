@@ -77,7 +77,9 @@ def process_file_initialization(file_id):
         # Read CSV
         df = pd.read_csv(file_obj.file_path.path) 
         email_col = next((col for col in df.columns if 'email' in col.lower()), df.columns[0])
+        
         emails = df[email_col].dropna().astype(str).unique().tolist()
+        print(f"[MANAGER] mail col: {email_col}, length mails {len(emails)}")
         total_count = len(emails)
         
         # --- NEW: Filter Suppression Lists via Redis (CPU Intensive) ---

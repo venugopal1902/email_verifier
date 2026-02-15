@@ -12,10 +12,9 @@ from files.models import FileUpload, VerificationResult, BouncedEmail, Unsubscri
 from accounts.models import Account  
 from .serializers import FileListSerializer
 from files.tasks import process_file_initialization
-import redis
-from django.conf import settings
-from core.redis_utils import add_to_list
 
+# Redis Utility
+from core.redis_utils import add_to_list
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +31,11 @@ class FileUploadView(views.APIView):
         serializer = FileListSerializer(data=request.data)
         if serializer.is_valid():
             try:
-                # 1. Save File
                 file_obj = serializer.save(uploaded_by_user_id=str(request.user.id))
                 
-                # 2. Check Account
                 if hasattr(request.user, 'account') and request.user.account:
                     _ = request.user.account
                 
-                # 3. Trigger Task (FIX: Use .file_id instead of .id)
                 process_file_initialization.apply_async(args=[file_obj.file_id], queue='cpu')
                 
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -60,7 +56,7 @@ class FileHistoryView(generics.ListAPIView):
     def get_queryset(self):
         return FileUpload.objects.filter(
             uploaded_by_user_id=str(self.request.user.id)
-        ).order_by('-started_at')
+        ).order_by('-uploaded_at')
 
 class FileListView(FileHistoryView): pass
 
@@ -70,31 +66,29 @@ class FileListView(FileHistoryView): pass
 class SuppressionUploadView(views.APIView):
     parser_classes = [MultiPartParser, FormParser]
     permission_classes = [permissions.IsAuthenticated]
-
     def post(self, request, list_type):
         file_obj = request.FILES.get('file')
         if not file_obj: return Response({"error": "No file"}, status=400)
         try:
-
             if list_type == 'bounced':
                 model = BouncedEmail
                 redis_list_type = 'BOUNCE'
             else:
                 model = UnsubscribedEmail
                 redis_list_type = 'UNSUB'
-            # 2. Read CSV
+                
+            # Read CSV
             df = pd.read_csv(file_obj)
             col = next((c for c in df.columns if 'mail' in c.lower()), df.columns[0])
             emails = df[col].dropna().astype(str).str.lower().str.strip().unique().tolist()
             
             user_id_str = str(request.user.id)
 
-            # 3. Save to Postgres DB
+            # Save to Postgres DB
             objs = [model(email=e, uploaded_by_user_id=user_id_str) for e in emails]
             model.objects.bulk_create(objs, ignore_conflicts=True)
 
-            # 4. Save to Redis Shards
-            # We must loop because your `Notes` hashes ONE email at a time
+            # Save to Redis Shards using your utility
             for email in emails:
                 add_to_list(email=email, list_type=redis_list_type, user_id=user_id_str)
 
@@ -103,7 +97,6 @@ class SuppressionUploadView(views.APIView):
                 "processed_rows": len(emails),
                 "redis_updated": True
             }, status=201)
-            # return Response({"status": "success", "processed_rows": len(emails)}, status=201)
         except Exception as e:
             return Response({"error": str(e)}, status=500)
 
@@ -119,14 +112,20 @@ class SuppressionDeleteView(views.APIView):
 # ==========================================
 class FileStatusView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
+    
     def get(self, request, file_id):
-        # FIX: Use file_id instead of id
         file_obj = get_object_or_404(FileUpload, file_id=file_id, uploaded_by_user_id=str(request.user.id))
+        print(f"[DEBUG] Status Check for File ID: {file_id} - Status: {file_obj.status}, Processed: {file_obj.processed_records}/{file_obj.total_records}, bounce: {file_obj.filtered_bounce_count}, unsub: {file_obj.filtered_unsub_count}")
         return Response({
-            "id": file_obj.file_id, # Return file_id as id for frontend compatibility
+            "id": file_obj.file_id, 
             "status": file_obj.status,
-            "processed": file_obj.processed_records, "total": file_obj.total_records,
-            "valid": file_obj.valid_count, "invalid": file_obj.invalid_count
+            "processed": file_obj.processed_records, 
+            "total": file_obj.total_records,
+            # FIX: Map to the correct database columns used in tasks.py
+            "valid": file_obj.unique_record_count,       
+            "invalid": file_obj.invalid_record_count,
+            "bounced": file_obj.filtered_bounce_count,   
+            "unsub": file_obj.filtered_unsub_count       
         })
 
 class CreditBalanceView(views.APIView):
@@ -143,7 +142,6 @@ class CreditBalanceView(views.APIView):
 class FileDeleteView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
     def delete(self, request, pk=None):
-        # FIX: Use file_id=pk
         FileUpload.objects.filter(file_id=pk, uploaded_by_user_id=str(request.user.id)).delete()
         return Response({"status": "deleted"}, status=200)
 
@@ -153,7 +151,6 @@ class FileDeleteView(views.APIView):
 class DownloadValidCsvView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
     def get(self, request, file_id):
-        # FIX: Use file_id instead of id
         file_obj = get_object_or_404(FileUpload, file_id=file_id, uploaded_by_user_id=str(request.user.id))
         
         response = HttpResponse(content_type='text/csv')
@@ -164,45 +161,3 @@ class DownloadValidCsvView(views.APIView):
         results = VerificationResult.objects.filter(file=file_obj).iterator()
         for res in results: writer.writerow([res.email, res.final_status])
         return response
-class SuppressionUploadView(views.APIView):
-    parser_classes = [MultiPartParser, FormParser]
-    permission_classes = [permissions.IsAuthenticated]
-
-    def post(self, request, list_type):
-        file_obj = request.FILES.get('file')
-        if not file_obj: return Response({"error": "No file"}, status=400)
-        
-        try:
-            # 1. Determine Model & Redis Key
-            if list_type == 'bounced':
-                model = BouncedEmail
-                redis_key = 'bounced_emails' # Make sure this matches redis_utils
-            else:
-                model = UnsubscribedEmail
-                redis_key = 'unsub_emails'
-
-            # 2. Read CSV
-            df = pd.read_csv(file_obj)
-            col = next((c for c in df.columns if 'mail' in c.lower()), df.columns[0])
-            emails = df[col].dropna().astype(str).str.lower().str.strip().unique().tolist()
-            
-            # 3. Save to Postgres (Bulk Create)
-            objs = [
-                model(email=e, uploaded_by_user_id=str(request.user.id)) 
-                for e in emails
-            ]
-            model.objects.bulk_create(objs, ignore_conflicts=True)
-
-            # 4. Save to Redis (Pipeline for speed) [NEW STEP]
-            r = redis.Redis.from_url(settings.CELERY_BROKER_URL)
-            if emails:
-                r.sadd(redis_key, *emails)
-
-            return Response({
-                "status": "success", 
-                "processed_rows": len(emails),
-                "redis_updated": True
-            }, status=201)
-
-        except Exception as e:
-            return Response({"error": str(e)}, status=500)    
