@@ -157,7 +157,9 @@ class DownloadValidCsvView(views.APIView):
         response['Content-Disposition'] = f'attachment; filename="verified_{file_id}.csv"'
         
         writer = csv.writer(response)
-        writer.writerow(['Email Address', 'Status'])
+        writer.writerow(['Valid Email Address'])
         results = VerificationResult.objects.filter(file=file_obj).iterator()
-        for res in results: writer.writerow([res.email, res.final_status])
+        for res in results: 
+            if res.final_status == 'Valid':
+                writer.writerow([res.email])
         return response
